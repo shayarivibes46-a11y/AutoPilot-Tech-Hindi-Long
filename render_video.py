@@ -20,7 +20,15 @@ resume_url = os.environ.get('RESUME_URL')
 print(f"Total Scenes to render: {len(scenes_data)}")
 
 subprocess.run(['edge-tts', '--voice', 'hi-IN-MadhurNeural', '--text', full_text, '--write-media', 'voiceover.mp3'])
-voiceover = AudioFileClip("voiceover.mp3")
+
+# --- FIX START: Audio Sync Problem Fix ---
+raw_voiceover = AudioFileClip("voiceover.mp3")
+# Edge-TTS ki shuruati khali aawaz (silence) ko trim kar rahe hain
+if raw_voiceover.duration > 1.0:
+    voiceover = raw_voiceover.subclip(0.3)
+else:
+    voiceover = raw_voiceover
+# --- FIX END ---
 
 total_chars = sum(len(s['text']) for s in scenes_data)
 video_clips = []
