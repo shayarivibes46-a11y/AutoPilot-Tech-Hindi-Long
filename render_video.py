@@ -43,7 +43,9 @@ except:
     whoosh_sfx = pop_sfx = None
 
 viral_colors = ['#FFD400', '#00FFFF', '#FFFFFF', '#39FF14'] 
-TARGET_W, TARGET_H = 1920, 1080
+
+# --- MEMORY FIX 1: Scaled down to 720p to prevent GitHub Actions Exit Code 143 ---
+TARGET_W, TARGET_H = 1280, 720
 
 for i, scene in enumerate(scenes_data):
     keyword = scene.get('keyword', 'nature')
@@ -76,9 +78,9 @@ for i, scene in enumerate(scenes_data):
         
         for w_i, chunk in enumerate(chunks):
             current_color = viral_colors[w_i % len(viral_colors)]
-            bg_txt = TextClip(chunk, fontsize=100, color='black', font=HINDI_FONT_FILE, stroke_color='black', stroke_width=15, method='caption', size=(1600, None))
+            bg_txt = TextClip(chunk, fontsize=100, color='black', font=HINDI_FONT_FILE, stroke_color='black', stroke_width=15, method='caption', size=(int(TARGET_W * 0.85), None))
             bg_txt = bg_txt.set_position(('center', 'center')).set_duration(duration_per_chunk).set_start(w_i * duration_per_chunk)
-            main_txt = TextClip(chunk, fontsize=100, color=current_color, font=HINDI_FONT_FILE, stroke_color='black', stroke_width=3, method='caption', size=(1600, None))
+            main_txt = TextClip(chunk, fontsize=100, color=current_color, font=HINDI_FONT_FILE, stroke_color='black', stroke_width=3, method='caption', size=(int(TARGET_W * 0.85), None))
             main_txt = main_txt.set_position(('center', 'center')).set_duration(duration_per_chunk).set_start(w_i * duration_per_chunk)
             word_clips.extend([bg_txt, main_txt])
         
@@ -93,7 +95,8 @@ for i, scene in enumerate(scenes_data):
     except Exception as e:
         print(f"Error on scene {i}: {e}")
 
-final_video = concatenate_videoclips(video_clips, method="compose")
+# --- MEMORY FIX 2: Changed method from "compose" to "chain" ---
+final_video = concatenate_videoclips(video_clips, method="chain")
 
 final_duration = final_video.duration
 progress_bar = ColorClip(size=(TARGET_W, 15), color=(255, 0, 0))
