@@ -1,9 +1,11 @@
 import os, requests, json, subprocess, socket
+import time # Added time module for the delay
 import moviepy.editor as mpe
 import urllib3.util.connection as urllib3_cn
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeAudioClip, CompositeVideoClip, TextClip, concatenate_videoclips, vfx, afx, ColorClip
 
 # 🛡️ HACKER TRICK: Force IPv4 to bypass Hostinger "Network is unreachable" block
+# EXPERIMENTAL: Try commenting this block out if the webhook continues to fail
 def allowed_gai_family():
     return socket.AF_INET
 urllib3_cn.allowed_gai_family = allowed_gai_family
@@ -164,10 +166,16 @@ safe_headers = {
 
 if resume_url:
     print(f"Resuming n8n workflow at: {resume_url}")
-    try:
-        response = requests.post(resume_url, json={"body": payload}, headers=safe_headers, timeout=30)
-        print(f"n8n Resume Response: {response.status_code} - {response.text}")
-    except Exception as e:
-        print(f"Warning: Failed to resume n8n. Error: {e}")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(resume_url, json={"body": payload}, headers=safe_headers, timeout=30)
+            print(f"n8n Resume Response: {response.status_code} - {response.text}")
+            break # Success hone par loop se bahar aa jayega
+        except Exception as e:
+            print(f"Warning: Failed to resume n8n on attempt {attempt + 1}. Error: {e}")
+            if attempt < max_retries - 1:
+                print("Retrying in 10 seconds...")
+                time.sleep(10) # Dusri try se pehle 10 second wait karega
 else:
     print("No RESUME_URL provided by n8n.")
