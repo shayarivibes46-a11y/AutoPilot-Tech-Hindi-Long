@@ -6,127 +6,89 @@ import moviepy.video.fx.all as vfx
 # --- VARIABLES ---
 scenes_data = json.loads(os.environ.get('SCENES_DATA', '[]'))
 title = os.environ.get('TITLE', 'Engineering Marvel')
-description = os.environ.get('DESCRIPTION', 'Amazing tech facts in Hindi.')
+description = os.environ.get('DESCRIPTION', 'Amazing tech facts.')
 thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic tech thumbnail')
 pexels_key = os.environ.get('PEXELS_API_KEY')
 chat_id = os.environ.get('CHAT_ID')
 
-# ENGINEERING FALLBACK KEYWORDS
+print(f"DEBUG: Processing {len(scenes_data)} scenes.")
+
 FALLBACK_KEYWORDS = ["technology abstract", "engineering architecture", "factory robotics", "circuit board digital"]
 
 def fetch_pexels_video(keyword):
     queries_to_try = [f"{keyword} technology"] + FALLBACK_KEYWORDS
     for query in queries_to_try:
-        for attempt in range(3):
-            try:
-                time.sleep(random.uniform(0.5, 1.5))
-                random_page = random.randint(1, 5) 
-                res = requests.get(f"https://api.pexels.com/videos/search?query={query}&per_page=5&page={random_page}&orientation=landscape", headers={"Authorization": pexels_key}, timeout=10).json()
-                if res.get('videos') and len(res['videos']) > 0:
-                    return random.choice(res['videos'])['video_files'][0]['link']
-            except:
-                time.sleep(2)
-                continue
+        try:
+            res = requests.get(f"https://api.pexels.com/videos/search?query={query}&per_page=5&orientation=landscape", headers={"Authorization": pexels_key}, timeout=10).json()
+            if res.get('videos'): return random.choice(res['videos'])['video_files'][0]['link']
+        except: continue
     return None
 
-def clean_text_for_tts(text):
-    safe_text = text.replace('&', ' aur ').replace('<', '').replace('>', '').replace('"', '').replace('`', '')
-    safe_text = re.sub(r'[^\w\s.,?!-]', '', safe_text)
-    return safe_text.strip()
+def clean_text(text):
+    return re.sub(r'[^\w\s.,?!-]', '', text.replace('&', ' aur ').strip())
 
 # ==========================================
-# PHASE 1: RENDER SCENES (FAIL-SAFE)
+# PHASE 1: RENDER SCENES
 # ==========================================
 def process_scene(i, scene):
-    keyword = scene.get('keyword', 'technology')
-    text_line = clean_text_for_tts(scene.get('text', '').strip())
-    if not text_line: return None
-
-    audio_path = os.path.abspath(f"audio_{i}.wav")
-    scene_filename = os.path.abspath(f"scene_{i}.mp4")
-    raw_mp3 = f"raw_a_{i}.mp3"
-    temp_txt = f"temp_{i}.txt"
-    vid_path = f"raw_vid_{i}.mp4"
+    text_line = clean_text(scene.get('text', ''))
+    audio_path = os.path.realpath(f"audio_{i}.wav")
+    scene_filename = os.path.realpath(f"scene_{i}.mp4")
     
     try:
+        # TTS
+        temp_txt = f"temp_{i}.txt"
         with open(temp_txt, "w", encoding="utf-8") as f: f.write(text_line)
-        for attempt in range(3):
-            try:
-                subprocess.run([sys.executable, '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', temp_txt, '--write-media', raw_mp3], check=True)
-                subprocess.run(['ffmpeg', '-y', '-i', raw_mp3, '-ss', '0.2', '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if os.path.exists(audio_path): break
-            except: time.sleep(2)
+        subprocess.run([sys.executable, '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', temp_txt, '--write-media', f"raw_{i}.mp3"], check=True)
+        subprocess.run(['ffmpeg', '-y', '-i', f"raw_{i}.mp3", '-ss', '0.2', '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path], check=True)
         
-        audio_clip = AudioFileClip(audio_path)
-        dur = audio_clip.duration
-        audio_clip.close()
+        dur = AudioFileClip(audio_path).duration
+        vid_url = fetch_pexels_video(scene.get('keyword', 'technology'))
         
-        vid_url = fetch_pexels_video(keyword)
         if vid_url:
+            vid_path = f"raw_{i}.mp4"
             with open(vid_path, "wb") as f: f.write(requests.get(vid_url, timeout=30).content)
-            clip = VideoFileClip(vid_path)
-            clip = clip.loop(duration=dur) if clip.duration < dur else clip.subclip(0, dur)
-            if clip.w / clip.h > 1920 / 1080: clip = clip.resize(height=1080)
-            else: clip = clip.resize(width=1920)
-            clip = clip.crop(x_center=clip.w/2, y_center=clip.h/2, width=1920, height=1080).fx(vfx.fadein, 0.5).fx(vfx.fadeout, 0.5)
+            clip = VideoFileClip(vid_path).loop(duration=dur).resize(height=720).crop(x_center=640, y_center=360, width=1280, height=720).fx(vfx.fadein, 0.5).fx(vfx.fadeout, 0.5)
             clip.write_videofile(scene_filename, fps=24, codec="libx264", audio=False, ffmpeg_params=['-pix_fmt', 'yuv420p'], logger=None)
             clip.close()
         else:
-            ColorClip(size=(1920, 1080), color=(5, 5, 15), duration=dur).fx(vfx.fadein, 0.5).fx(vfx.fadeout, 0.5).write_videofile(scene_filename, fps=24, codec="libx264", audio=False, ffmpeg_params=['-pix_fmt', 'yuv420p'], logger=None)
+            ColorClip(size=(1280, 720), color=(0, 0, 0), duration=dur).write_videofile(scene_filename, fps=24, codec="libx264", audio=False, ffmpeg_params=['-pix_fmt', 'yuv420p'], logger=None)
         
-        for f in [temp_txt, raw_mp3, vid_path]:
-            if os.path.exists(f): os.remove(f)
         return {"vid": scene_filename, "aud": audio_path, "index": i}
-    except: return None
+    except Exception as e:
+        print(f"Error scene {i}: {e}")
+        return None
 
 results = []
 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
     futures = [executor.submit(process_scene, i, scene) for i, scene in enumerate(scenes_data)]
-    for future in concurrent.futures.as_completed(futures):
-        res = future.result()
-        if res: results.append(res)
+    for f in concurrent.futures.as_completed(futures):
+        if f.result(): results.append(f.result())
 
 if not results: sys.exit(1)
+results.sort(key=lambda x: x['index'])
 
-results = sorted(results, key=lambda x: x['index'])
-with open("vid_list.txt", "w") as f:
+# ==========================================
+# PHASE 2: MERGE (SAFE CONCAT)
+# ==========================================
+with open("list.txt", "w") as f:
     for r in results: f.write(f"file '{r['vid']}'\n")
-with open("aud_list.txt", "w") as f:
-    for r in results: f.write(f"file '{r['aud']}'\n")
+
+# Use FFmpeg to concat without Python-MoviePy overhead
+subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', 'merged.mp4'], check=True)
+
+# Add BGM & Normalization
+subprocess.run(['ffmpeg', '-y', '-i', 'merged.mp4', '-i', 'audio_0.wav', '-filter_complex', '[1:a]loudnorm[a]', '-map', '0:v', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', 'final_video.mp4'], check=True)
 
 # ==========================================
-# PHASE 2: MERGE & BGM
-# ==========================================
-subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'vid_list.txt', '-c', 'copy', 'raw_merged_video.mp4'], check=True)
-subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'aud_list.txt', '-c', 'pcm_s16le', 'merged_audio.wav'], check=True)
-
-cmd = ['ffmpeg', '-y', '-i', 'raw_merged_video.mp4', '-i', 'merged_audio.wav']
-if os.path.exists("bgm.mp3"):
-    cmd += ['-stream_loop', '-1', '-i', 'bgm.mp3', '-filter_complex', '[0:v]eq=contrast=1.1:saturation=1.25,drawtext=text=\'Engineering Decode\':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50[vout];[1:a]loudnorm=I=-14:TP=-2:LRA=11[norm_voice];[2:a]volume=0.08[bgm];[norm_voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]', '-map', '[vout]', '-map', '[aout]']
-else:
-    cmd += ['-filter_complex', '[0:v]eq=contrast=1.1:saturation=1.25,drawtext=text=\'Engineering Decode\':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50[vout];[1:a]loudnorm=I=-14:TP=-2:LRA=11[aout]', '-map', '[vout]', '-map', '[aout]']
-cmd += ['-c:v', 'libx264', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', 'final_video.mp4']
-subprocess.run(cmd, check=True)
-
-# ==========================================
-# PHASE 3: UPLOAD
+# PHASE 3: UPLOAD & TELEGRAM
 # ==========================================
 video_link = None
-for url in ["https://litterbox.catbox.moe/resources/internals/api.php", "https://tmpfiles.org/api/v1/upload"]:
-    try:
-        files = {'fileToUpload' if "litterbox" in url else 'file': open("final_video.mp4", 'rb')}
-        data = {'reqtype': 'fileupload', 'time': '12h'} if "litterbox" in url else None
-        res = requests.post(url, files=files, data=data, timeout=600)
-        if "litterbox" in url and res.status_code == 200 and res.text.startswith("http"): video_link = res.text.strip()
-        elif "tmpfiles" in url and res.json().get('status') == 'success': video_link = res.json()['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-        if video_link: break
-    except: continue
+try:
+    res = requests.post("https://tmpfiles.org/api/v1/upload", files={'file': open('final_video.mp4', 'rb')}, timeout=600).json()
+    if res.get('status') == 'success': video_link = res['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+except: pass
 
-# ==========================================
-# PHASE 4: TELEGRAM NOTIFICATION
-# ==========================================
-BOT_TOKEN = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg"
-if video_link:
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"READY_TO_UPLOAD|{video_link}|{title.replace('|', '')}|{thumbnail_prompt.replace('|', '')}|{description.replace('|', '')}"})
-else:
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"⚠️ ERROR: Upload fail hua, GitHub Actions check karein."})
+token = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg"
+msg = f"READY_TO_UPLOAD|{video_link}|{title[:60]}|{thumbnail_prompt[:500]}|{description[:157]}" if video_link else "⚠️ Upload Failed."
+requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": msg})
