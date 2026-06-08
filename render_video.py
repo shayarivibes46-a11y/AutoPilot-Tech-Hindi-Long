@@ -1,5 +1,10 @@
 import os, sys, requests, json, subprocess, gc, time, random, re
 import concurrent.futures
+from PIL import Image
+# FIX: Pillow compatibility patch
+if not hasattr(Image, 'ANTIALIAS'):
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
+
 from moviepy.editor import VideoFileClip, AudioFileClip, ColorClip
 import moviepy.video.fx.all as vfx
 
@@ -11,21 +16,23 @@ thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic tech thumbnail'
 pexels_key = os.environ.get('PEXELS_API_KEY')
 chat_id = os.environ.get('CHAT_ID')
 
-print(f"DEBUG: Processing {len(scenes_data)} scenes.")
-
 FALLBACK_KEYWORDS = ["technology abstract", "engineering architecture", "factory robotics", "circuit board digital"]
 
 def fetch_pexels_video(keyword):
     queries_to_try = [f"{keyword} technology"] + FALLBACK_KEYWORDS
     for query in queries_to_try:
-        try:
-            res = requests.get(f"https://api.pexels.com/videos/search?query={query}&per_page=5&orientation=landscape", headers={"Authorization": pexels_key}, timeout=10).json()
-            if res.get('videos'): return random.choice(res['videos'])['video_files'][0]['link']
-        except: continue
+        for attempt in range(3):
+            try:
+                time.sleep(random.uniform(0.5, 1.5))
+                res = requests.get(f"https://api.pexels.com/videos/search?query={query}&per_page=5&orientation=landscape", headers={"Authorization": pexels_key}, timeout=10).json()
+                if res.get('videos'): return random.choice(res['videos'])['video_files'][0]['link']
+            except: continue
     return None
 
 def clean_text(text):
-    return re.sub(r'[^\w\s.,?!-]', '', text.replace('&', ' aur ').strip())
+    # Emojis aur weird chars hatao taaki Edge-TTS crash na ho
+    safe = re.sub(r'[^\w\s.,?!-]', '', text.replace('&', ' aur '))
+    return safe.strip()
 
 # ==========================================
 # PHASE 1: RENDER SCENES
@@ -36,7 +43,6 @@ def process_scene(i, scene):
     scene_filename = os.path.realpath(f"scene_{i}.mp4")
     
     try:
-        # TTS
         temp_txt = f"temp_{i}.txt"
         with open(temp_txt, "w", encoding="utf-8") as f: f.write(text_line)
         subprocess.run([sys.executable, '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', temp_txt, '--write-media', f"raw_{i}.mp3"], check=True)
@@ -69,16 +75,13 @@ if not results: sys.exit(1)
 results.sort(key=lambda x: x['index'])
 
 # ==========================================
-# PHASE 2: MERGE (SAFE CONCAT)
+# PHASE 2: MERGE
 # ==========================================
 with open("list.txt", "w") as f:
     for r in results: f.write(f"file '{r['vid']}'\n")
 
-# Use FFmpeg to concat without Python-MoviePy overhead
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', 'merged.mp4'], check=True)
-
-# Add BGM & Normalization
-subprocess.run(['ffmpeg', '-y', '-i', 'merged.mp4', '-i', 'audio_0.wav', '-filter_complex', '[1:a]loudnorm[a]', '-map', '0:v', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', 'final_video.mp4'], check=True)
+subprocess.run(['ffmpeg', '-y', '-i', 'merged.mp4', '-i', results[0]['aud'], '-filter_complex', '[0:v]eq=contrast=1.1:saturation=1.25,drawtext=text=\'Engineering Decode\':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50[vout];[1:a]loudnorm[a]', '-map', '[vout]', '-map', '[a]', '-c:v', 'libx264', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', 'final_video.mp4'], check=True)
 
 # ==========================================
 # PHASE 3: UPLOAD & TELEGRAM
