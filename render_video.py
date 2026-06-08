@@ -1,4 +1,20 @@
-import os, sys, requests, json, subprocess, time, random, re, gc
+import os
+import sys
+import requests
+import json
+import subprocess
+import time
+import random
+import re
+import gc
+import concurrent.futures  # Yeh line miss thi aapke code mein
+from PIL import Image
+
+# Compatibility patch for Pillow/MoviePy
+if not hasattr(Image, 'ANTIALIAS'):
+    Image.ANTIALIAS = Image.Resampling.LANCZOS
+
+from moviepy.editor import AudioFileClip
 
 # --- VARIABLES ---
 scenes_data = json.loads(os.environ.get('SCENES_DATA', '[]'))
@@ -17,7 +33,7 @@ def process_scene(i, scene):
     scene_filename = f"scene_{i}.mp4"
     
     try:
-        # TTS with Retry
+        # TTS generation with retry
         with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_line)
         for attempt in range(3):
             try:
@@ -29,7 +45,7 @@ def process_scene(i, scene):
         dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]).decode().strip())
         fade_out_start = max(0, dur - 0.5)
         
-        # Native FFmpeg Render (No RAM load)
+        # Native FFmpeg Render
         vf = f'scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out_start}:d=0.5'
         subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1280x720', '-t', str(dur), '-vf', vf, '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
         return {"vid": scene_filename, "aud": audio_path, "index": i}
@@ -43,26 +59,21 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
     futures = [executor.submit(process_scene, i, scene) for i, scene in enumerate(scenes_data)]
     for f in concurrent.futures.as_completed(futures):
         if f.result(): results.append(f.result())
+
 results.sort(key=lambda x: x['index'])
 
-# --- PRO-PRODUCTION MERGE (Ducking & Sync) ---
+# --- MERGE & PRO-DUCKING ---
 with open("list_v.txt", "w") as f:
     for r in results: f.write(f"file '{r['vid']}'\n")
 with open("list_a.txt", "w") as f:
     for r in results: f.write(f"file '{r['aud']}'\n")
 
-# Merging
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_v.txt', '-c', 'copy', '-async', '1', 'v_merged.mp4'], check=True)
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_a.txt', '-c', 'pcm_s16le', 'a_merged.wav'], check=True)
 
-# Final Pro Ducking Merge
+# Final Merge with stable mixing
 subprocess.run([
     'ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3',
     '-filter_complex', '[1:a]volume=1.0[a1];[2:a]volume=0.1[a2];[a1][a2]amix=inputs=2:duration=first[aout];[0:v]drawtext=text=\'Engineering Decode\':x=w-tw-50:y=h-th-50:fontsize=48:fontcolor=white@0.5[vout]',
     '-map', '[vout]', '-map', '[aout]', '-c:v', 'libx264', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', 'final_video.mp4'
 ], check=True)
-
-# --- TELEGRAM NOTIFICATION ---
-token = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg"
-video_link = "URL_FROM_TMPFILES" # Yahan aapka upload logic aayega
-requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": chat_id, "text": f"✅ Engineering Decode video ready! {video_link}"})
