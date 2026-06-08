@@ -123,7 +123,7 @@ for url in ["https://litterbox.catbox.moe/resources/internals/api.php", "https:/
 # PHASE 4: TELEGRAM NOTIFICATION
 # ==========================================
 # APNA TELEGRAM BOT TOKEN YAHAN DAALEIN:
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE" 
+BOT_TOKEN = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg" 
 
 if video_link:
     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": f"READY_TO_UPLOAD|{video_link}|{title.replace('|', '')}|{thumbnail_prompt.replace('|', '')}|{description.replace('|', '')}"})
