@@ -1,7 +1,7 @@
-import os, sys, requests, json, subprocess, gc, time, random, re
+import os, sys, requests, json, subprocess, time, random, re
 import concurrent.futures
 from PIL import Image
-# FIX: Pillow compatibility patch
+# Compatibility patch for Pillow/MoviePy
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.Resampling.LANCZOS
 
@@ -16,45 +16,42 @@ thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic tech thumbnail'
 pexels_key = os.environ.get('PEXELS_API_KEY')
 chat_id = os.environ.get('CHAT_ID')
 
-FALLBACK_KEYWORDS = ["technology abstract", "engineering architecture", "factory robotics", "circuit board digital"]
+def clean_text_for_tts(text):
+    # Emojis aur weird chars hatao jo Edge-TTS crash karte hain
+    safe_text = re.sub(r'[^\w\s.,?!-]', '', text.replace('&', ' aur '))
+    return safe_text.strip()
 
 def fetch_pexels_video(keyword):
-    queries_to_try = [f"{keyword} technology"] + FALLBACK_KEYWORDS
-    for query in queries_to_try:
-        for attempt in range(3):
-            try:
-                time.sleep(random.uniform(0.5, 1.5))
-                res = requests.get(f"https://api.pexels.com/videos/search?query={query}&per_page=5&orientation=landscape", headers={"Authorization": pexels_key}, timeout=10).json()
-                if res.get('videos'): return random.choice(res['videos'])['video_files'][0]['link']
-            except: continue
+    try:
+        res = requests.get(f"https://api.pexels.com/videos/search?query={keyword} technology&per_page=3&orientation=landscape", headers={"Authorization": pexels_key}, timeout=10).json()
+        if res.get('videos'): return random.choice(res['videos'])['video_files'][0]['link']
+    except: return None
     return None
-
-def clean_text(text):
-    # Emojis aur weird chars hatao taaki Edge-TTS crash na ho
-    safe = re.sub(r'[^\w\s.,?!-]', '', text.replace('&', ' aur '))
-    return safe.strip()
 
 # ==========================================
 # PHASE 1: RENDER SCENES
 # ==========================================
 def process_scene(i, scene):
-    text_line = clean_text(scene.get('text', ''))
-    audio_path = os.path.realpath(f"audio_{i}.wav")
-    scene_filename = os.path.realpath(f"scene_{i}.mp4")
+    text_line = clean_text_for_tts(scene.get('text', ''))
+    audio_path = f"audio_{i}.wav"
+    scene_filename = f"scene_{i}.mp4"
     
     try:
-        temp_txt = f"temp_{i}.txt"
-        with open(temp_txt, "w", encoding="utf-8") as f: f.write(text_line)
-        subprocess.run([sys.executable, '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', temp_txt, '--write-media', f"raw_{i}.mp3"], check=True)
-        subprocess.run(['ffmpeg', '-y', '-i', f"raw_{i}.mp3", '-ss', '0.2', '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path], check=True)
+        # TTS generation with retry
+        with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_line)
+        for attempt in range(3):
+            try:
+                subprocess.run([sys.executable, '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
+                subprocess.run(['ffmpeg', '-y', '-i', f"raw_{i}.mp3", '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path], check=True)
+                if os.path.exists(audio_path): break
+            except: time.sleep(2)
         
         dur = AudioFileClip(audio_path).duration
         vid_url = fetch_pexels_video(scene.get('keyword', 'technology'))
         
         if vid_url:
-            vid_path = f"raw_{i}.mp4"
-            with open(vid_path, "wb") as f: f.write(requests.get(vid_url, timeout=30).content)
-            clip = VideoFileClip(vid_path).loop(duration=dur).resize(height=720).crop(x_center=640, y_center=360, width=1280, height=720).fx(vfx.fadein, 0.5).fx(vfx.fadeout, 0.5)
+            with open(f"raw_{i}.mp4", "wb") as f: f.write(requests.get(vid_url, timeout=30).content)
+            clip = VideoFileClip(f"raw_{i}.mp4").loop(duration=dur).resize(height=720).crop(x_center=640, y_center=360, width=1280, height=720)
             clip.write_videofile(scene_filename, fps=24, codec="libx264", audio=False, ffmpeg_params=['-pix_fmt', 'yuv420p'], logger=None)
             clip.close()
         else:
@@ -75,12 +72,14 @@ if not results: sys.exit(1)
 results.sort(key=lambda x: x['index'])
 
 # ==========================================
-# PHASE 2: MERGE
+# PHASE 2: MERGE & BGM
 # ==========================================
 with open("list.txt", "w") as f:
     for r in results: f.write(f"file '{r['vid']}'\n")
 
+# Concatenate videos
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list.txt', '-c', 'copy', 'merged.mp4'], check=True)
+# Add BGM and Watermark
 subprocess.run(['ffmpeg', '-y', '-i', 'merged.mp4', '-i', results[0]['aud'], '-filter_complex', '[0:v]eq=contrast=1.1:saturation=1.25,drawtext=text=\'Engineering Decode\':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50[vout];[1:a]loudnorm[a]', '-map', '[vout]', '-map', '[a]', '-c:v', 'libx264', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', 'final_video.mp4'], check=True)
 
 # ==========================================
