@@ -4,7 +4,7 @@ import concurrent.futures
 # --- CONFIG & INPUT HANDLING ---
 raw_scenes = os.environ.get('SCENES_DATA')
 pexels_key = os.environ.get('PEXELS_API_KEY')
-bot_token = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg"
+bot_token = "8952624775:AAFXQXosY1GIsVvWgeqWi4L2LE1LoQnPc3Q"
 chat_id = os.environ.get('CHAT_ID')
 
 # Naye environment variables fetch karein (GitHub Action se)
