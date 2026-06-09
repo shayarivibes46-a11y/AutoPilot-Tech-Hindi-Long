@@ -45,17 +45,16 @@ def fetch_multiple_pexels_videos(keyword, count=2):
     return videos_found
 
 def process_scene(i, scene, retry=3):
-    """Scene Processing with Ken Burns Zoom & Auto-Captions"""
+    """Scene Processing with Ken Burns Zoom (No Captions)"""
     for attempt in range(retry):
         try:
             gc.collect()
             audio_path = f"audio_{i}.wav"
             scene_filename = f"scene_{i}.mp4"
-            subtitle_file = f"sub_{i}.vtt"
             clip_list_txt = f"clips_{i}.txt"
             base_vid = f"base_{i}.mp4"
             
-            # 1. TTS & Subtitle Generation
+            # 1. TTS Generation (No Subtitles)
             text_clean = re.sub(r'[^\w\s.,?!-]', '', scene.get('text', '').replace('&', ' aur ')).strip()
             with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_clean)
             
@@ -64,8 +63,7 @@ def process_scene(i, scene, retry=3):
                 '--voice', 'hi-IN-MadhurNeural', 
                 '--rate=+10%', 
                 '-f', f"temp_{i}.txt", 
-                '--write-media', f"raw_{i}.mp3",
-                '--write-subtitles', subtitle_file
+                '--write-media', f"raw_{i}.mp3"
             ], check=True)
             
             subprocess.run(['ffmpeg', '-y', '-i', f"raw_{i}.mp3", '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path], check=True)
@@ -92,14 +90,11 @@ def process_scene(i, scene, retry=3):
                 for c in clip_files: f.write(f"file '{c}'\n")
             subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', clip_list_txt, '-c', 'copy', base_vid], check=True)
             
-            # 3. Apply Ken Burns Zoom & Subtitles
-            # Zoompan filter slowly zooms in to 110% over time
-            sub_style = "FontName=Arial,FontSize=26,PrimaryColour=&H00FFFF&,OutlineColour=&H000000&,Outline=2,Shadow=1,Bold=1,Alignment=2,MarginV=40"
-            vf_string = f"zoompan=z='min(max(zoom,pzoom)+0.001,1.1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=25,subtitles={subtitle_file}:force_style='{sub_style}'"
+            # 3. Apply Ken Burns Zoom ONLY (Removed subtitles)
+            vf_string = f"zoompan=z='min(max(zoom,pzoom)+0.001,1.1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=25"
             
             subprocess.run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', base_vid, '-t', str(dur), '-vf', vf_string, '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
             
-            # Return duration and keyword for Timestamp Generation
             return {"vid": scene_filename, "aud": audio_path, "index": i, "dur": dur, "keyword": scene.get('keyword', MAIN_TOPIC)}
             
         except Exception as e:
@@ -179,7 +174,6 @@ try:
     hashtags = f"#EngineeringDecode #{topic_hash} #TechHindi #EngineeringExplained"
     disclaimer = "Disclaimer: All visual elements used in this video are legally sourced and heavily edited to create original, transformative educational content under Fair Use."
     
-    # Combining everything logically for YouTube formatting
     full_description = f"{seo_desc}\n\n{chapters_str}\n{hashtags}\n\n{disclaimer}"
     final_message = f"READY_TO_UPLOAD|{video_link}|{seo_title}|{thumb_prompt}|{full_description}"
     
