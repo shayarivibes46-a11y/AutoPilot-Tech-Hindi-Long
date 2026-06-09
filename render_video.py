@@ -3,35 +3,31 @@ import concurrent.futures
 
 # --- CONFIG & INPUT HANDLING ---
 raw_scenes = os.environ.get('SCENES_DATA')
+pexels_key = os.environ.get('PEXELS_API_KEY')
+bot_token = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg"
+chat_id = os.environ.get('CHAT_ID')
 
-# Robust JSON Loading
-if not raw_scenes or raw_scenes == 'undefined':
-    print("FATAL: SCENES_DATA environment variable is empty!")
+# Validate input
+if not raw_scenes:
+    print("FATAL: SCENES_DATA environment variable is missing.")
     sys.exit(1)
 
 try:
     scenes_data = json.loads(raw_scenes)
 except json.JSONDecodeError as e:
-    print(f"FATAL: Failed to parse SCENES_DATA as JSON. Input: {raw_scenes}")
+    print(f"FATAL: JSON Decode Error. Input: {raw_scenes}")
     raise e
 
-pexels_key = os.environ.get('PEXELS_API_KEY')
-bot_token = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg"
-chat_id = os.environ.get('CHAT_ID')
-
 # --- TOPIC & HASHTAG SETUP ---
-exact_topic = os.environ.get('VIDEO_TOPIC') or os.environ.get('USER_PROMPT') or ""
-MAIN_TOPIC = exact_topic.strip().title() if exact_topic.strip() else (scenes_data[0].get('keyword', 'Engineering').title() if scenes_data else 'Engineering')
-
+MAIN_TOPIC = os.environ.get('VIDEO_TOPIC', scenes_data[0].get('keyword', 'Engineering')).strip().title()
 clean_words = [re.sub(r'[^A-Za-z0-9]', '', w) for w in MAIN_TOPIC.split()]
 topic_hash = "".join([w for w in clean_words if w][:3])
 
 # --- FETCH ENGINE ---
-def fetch_multiple_pexels_videos(keyword, count=2):
+def fetch_multiple_pexels_videos(keyword, count=1):
     search_terms = [keyword, topic_hash, "technology background"]
     videos_found = []
     for term in search_terms:
-        if not term: continue
         try:
             url = f"https://api.pexels.com/videos/search?query={term}&per_page=10&orientation=landscape"
             res = requests.get(url, headers={"Authorization": pexels_key}, timeout=20).json()
@@ -39,8 +35,7 @@ def fetch_multiple_pexels_videos(keyword, count=2):
                 for vid in res['videos']:
                     for file in vid['video_files']:
                         if file['quality'] == 'hd' and file['width'] >= 1280:
-                            if file['link'] not in videos_found:
-                                videos_found.append(file['link'])
+                            if file['link'] not in videos_found: videos_found.append(file['link'])
                             break
                     if len(videos_found) >= count: return videos_found
         except Exception: continue
@@ -49,26 +44,22 @@ def fetch_multiple_pexels_videos(keyword, count=2):
 # --- SCENE PROCESSING ---
 def process_scene(i, scene):
     try:
-        audio_path = f"audio_{i}.wav"
-        scene_filename = f"scene_{i}.mp4"
+        audio_path, scene_filename = f"audio_{i}.wav", f"scene_{i}.mp4"
         
-        # 1. TTS
+        # TTS
         text_clean = re.sub(r'[^\w\s.,?!-]', '', scene.get('text', '').replace('&', ' aur ')).strip()
         with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_clean)
         subprocess.run(['python', '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
         subprocess.run(['ffmpeg', '-y', '-i', f"raw_{i}.mp3", '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path], check=True)
-        
         dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]).decode().strip())
         
-        # 2. Video Download
-        urls = fetch_multiple_pexels_videos(scene.get('keyword', MAIN_TOPIC), count=1)
+        # Download & Zoom
+        urls = fetch_multiple_pexels_videos(scene.get('keyword', MAIN_TOPIC))
         if not urls: raise Exception("No video found")
         
         raw_clip = f"raw_{i}.mp4"
         with open(raw_clip, "wb") as f: f.write(requests.get(urls[0], timeout=30).content)
-        
-        # 3. Ken Burns Zoom
-        vf_string = f"zoompan=z='min(max(zoom,pzoom)+0.001,1.1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=25"
+        vf_string = "zoompan=z='min(max(zoom,pzoom)+0.001,1.1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=25"
         subprocess.run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', raw_clip, '-t', str(dur), '-vf', vf_string, '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
         
         return {"vid": scene_filename, "aud": audio_path, "index": i, "dur": dur, "keyword": scene.get('keyword', MAIN_TOPIC)}
@@ -78,34 +69,30 @@ def process_scene(i, scene):
 
 # --- MAIN EXECUTION ---
 try:
-    results = []
-    for i, scene in enumerate(scenes_data):
-        res = process_scene(i, scene)
-        if res: results.append(res)
-    
+    results = [res for i, scene in enumerate(scenes_data) if (res := process_scene(i, scene))]
     results.sort(key=lambda x: x['index'])
 
     # Merge
-    with open("list_v.txt", "w") as f:
-        for r in results: f.write(f"file '{r['vid']}'\n")
-    with open("list_a.txt", "w") as f:
-        for r in results: f.write(f"file '{r['aud']}'\n")
-
+    with open("list_v.txt", "w") as f: [f.write(f"file '{r['vid']}'\n") for r in results]
+    with open("list_a.txt", "w") as f: [f.write(f"file '{r['aud']}'\n") for r in results]
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_v.txt', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'v_merged.mp4'], check=True)
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_a.txt', '-c:a', 'pcm_s16le', 'a_merged.wav'], check=True)
 
-    # Final Render (Ducking)
+    # Studio Rendering
     studio_filter = "[1:a]asplit=2[voice_main][voice_control];[2:a]volume=0.12[bgm_low];[bgm_low][voice_control]sidechaincompress=threshold=0.05:ratio=12[ducked_bgm];[voice_main][ducked_bgm]amix=inputs=2:duration=first[aout];[0:v]drawtext=text='Engineering Decode':x=w-tw-50:y=h-th-50:fontsize=48:fontcolor=white@0.5[vout]"
     subprocess.run(['ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3', '-filter_complex', studio_filter, '-map', '[vout]', '-map', '[aout]', '-c:v', 'libx264', '-b:v', '2M', '-preset', 'medium', '-c:a', 'aac', '-shortest', 'final_video.mp4'], check=True)
 
-    # Upload
-    upload_res = requests.post("https://tmpfiles.org/api/v1/upload", files={'file': open('final_video.mp4', 'rb')}, timeout=600).json()
-    video_link = upload_res['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+    # UPLOAD WITH STATUS CHECK
+    print("Uploading final video...")
+    resp = requests.post("https://tmpfiles.org/api/v1/upload", files={'file': open('final_video.mp4', 'rb')}, timeout=600)
     
-    # Notify
-    final_msg = f"READY_TO_UPLOAD|{video_link}|{MAIN_TOPIC} Explained|Simple Thumbnail Prompt|Description here"
-    requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": final_msg})
+    if resp.status_code == 200:
+        video_link = resp.json()['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+        final_msg = f"READY_TO_UPLOAD|{video_link}|{MAIN_TOPIC} Explained|Simple Thumbnail Prompt|Description here"
+        requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": final_msg})
+    else:
+        raise Exception(f"Upload API Error {resp.status_code}: {resp.text}")
 
 except Exception as e:
-    error_msg = f"🚨 *PIPELINE FAILED!*\n*Error:* `{str(e)}`"
+    error_msg = f"🚨 *PIPELINE FAILED!*\n*Error:* `{str(e)[:100]}`"
     requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": error_msg, "parse_mode": "Markdown"})
