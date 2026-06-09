@@ -7,6 +7,11 @@ pexels_key = os.environ.get('PEXELS_API_KEY')
 bot_token = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg"
 chat_id = os.environ.get('CHAT_ID')
 
+# Naye environment variables fetch karein (GitHub Action se)
+video_title = os.environ.get('TITLE', 'Engineering Video')
+thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic engineering thumbnail')
+video_desc = os.environ.get('DESCRIPTION', 'Educational video')
+
 # Validate input
 if not raw_scenes:
     print("FATAL: SCENES_DATA environment variable is missing.")
@@ -89,7 +94,10 @@ try:
     
     if resp.status_code == 200:
         video_link = resp.json()['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-        final_msg = f"READY_TO_UPLOAD|{video_link}|{MAIN_TOPIC} Explained|Simple Thumbnail Prompt|Description here"
+        
+        # Yahan dynamic variables use ho rahe hain jo n8n se aaye hain
+        final_msg = f"READY_TO_UPLOAD|{video_link}|{video_title}|{thumbnail_prompt}|{video_desc}"
+        
         requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": final_msg})
     else:
         raise Exception(f"Upload API Error {resp.status_code}: {resp.text}")
