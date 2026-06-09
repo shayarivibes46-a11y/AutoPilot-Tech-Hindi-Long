@@ -14,7 +14,7 @@ def fetch_pexels_video(keyword):
     """Smart Pexels Fetcher: Universal fallback approach, enforces HD Landscape"""
     clean_keyword = re.sub(r'[^\w\s]', '', keyword).strip()
     first_word = clean_keyword.split()[0] if " " in clean_keyword else ""
-    search_terms = [clean_keyword, first_word, MAIN_TOPIC, "background"]
+    search_terms = [clean_keyword, first_word, MAIN_TOPIC, "technology background"]
     
     for term in search_terms:
         if not term: continue
@@ -23,15 +23,10 @@ def fetch_pexels_video(keyword):
             res = requests.get(url, headers={"Authorization": pexels_key}, timeout=20).json()
             
             if 'videos' in res and len(res['videos']) > 0:
-                # 1. Try to find an HD video first (1280px or higher)
                 for vid in res['videos']:
                     for file in vid['video_files']:
                         if file['quality'] == 'hd' and file['width'] >= 1280:
-                            print(f"DEBUG: Found HD Video for '{term}'")
                             return file['link']
-                
-                # 2. If no HD, return the highest available
-                print(f"DEBUG: Found standard Video for '{term}'")
                 return res['videos'][0]['video_files'][0]['link']
         except Exception as e:
             print(f"Pexels Fetch Error for '{term}': {e}")
@@ -47,7 +42,7 @@ def process_scene(i, scene, retry=3):
             scene_filename = f"scene_{i}.mp4"
             raw_video = f"raw_{i}.mp4"
             
-            # 1. TTS Generation (Cleaned text without prompt markers)
+            # 1. TTS Generation
             text_clean = re.sub(r'[^\w\s.,?!-]', '', scene.get('text', '').replace('&', ' aur ')).strip()
             with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_clean)
             subprocess.run([sys.executable, '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
@@ -59,7 +54,6 @@ def process_scene(i, scene, retry=3):
             vid_url = fetch_pexels_video(scene.get('keyword', MAIN_TOPIC))
             if vid_url:
                 with open(raw_video, "wb") as f: f.write(requests.get(vid_url, timeout=30).content)
-                
                 if os.path.getsize(raw_video) > 1000:
                     subprocess.run(['ffmpeg', '-y', '-i', raw_video, '-t', str(dur), '-vf', 'scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fps=25', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
                     return {"vid": scene_filename, "aud": audio_path, "index": i}
@@ -92,22 +86,24 @@ with open("list_a.txt", "w") as f:
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_v.txt', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'v_merged.mp4'], check=True)
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_a.txt', '-c:a', 'pcm_s16le', 'a_merged.wav'], check=True)
 
-# --- STUDIO PIPELINE: AUDIO DUCKING & 2-PASS ENCODING ---
+# --- STUDIO PIPELINE: LOW BGM AUDIO DUCKING & 2-PASS ENCODING ---
+# BGM volume is first reduced to 0.02, then ducked further when voice comes
 studio_filter = (
     "[1:a]asplit=2[voice_main][voice_control];"
-    "[2:a][voice_control]sidechaincompress=threshold=0.05:ratio=10[ducked_bgm];"
+    "[2:a]volume=0.02[bgm_low];"
+    "[bgm_low][voice_control]sidechaincompress=threshold=0.05:ratio=12[ducked_bgm];"
     "[voice_main][ducked_bgm]amix=inputs=2:duration=first[aout];"
     "[0:v]drawtext=text='Engineering Decode':x=w-tw-50:y=h-th-50:fontsize=48:fontcolor=white@0.5[vout]"
 )
 
-# Pass 1: Removed audio filters completely to avoid 'unconnected output' error
+# Pass 1
 subprocess.run([
     'ffmpeg', '-y', '-i', 'v_merged.mp4',
     '-vf', "drawtext=text='Engineering Decode':x=w-tw-50:y=h-th-50:fontsize=48:fontcolor=white@0.5",
     '-c:v', 'libx264', '-b:v', '2M', '-pass', '1', '-an', '-f', 'null', '/dev/null'
 ], check=True)
 
-# Pass 2: Full audio ducking graph applied correctly
+# Pass 2
 subprocess.run([
     'ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3',
     '-filter_complex', studio_filter,
@@ -115,24 +111,28 @@ subprocess.run([
     '-c:v', 'libx264', '-pass', '2', '-b:v', '2M', '-preset', 'slow', '-c:a', 'aac', '-async', '1', '-shortest', 'final_video.mp4'
 ], check=True)
 
-# --- DIRECT TELEGRAM UPLOAD & NOTIFICATION ---
+# --- UPLOAD & FORMATTED NOTIFICATION (Match EarnSmart & AIToolkit) ---
 try:
-    print("Uploading final video to Telegram...")
-    # Strict RankMath Character Limits Applied (Title <= 60, Desc <= 160)
-    seo_title = f"{MAIN_TOPIC} Explained in Hindi"[:60].strip()
-    seo_desc = f"Learn about {MAIN_TOPIC.lower()} in this detailed breakdown. Core concepts explained in Hindi for universal understanding."[:160].strip()
-    caption_text = f"🎬 {seo_title}\n\n📝 {seo_desc}\n\n✅ Video directly attached below!"
+    print("Uploading final video to tmpfiles...")
+    upload_res = requests.post("https://tmpfiles.org/api/v1/upload", files={'file': open('final_video.mp4', 'rb')}, timeout=600).json()
+    video_link = upload_res['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
     
-    tg_url = f"https://api.telegram.org/bot{bot_token}/sendVideo"
-    with open('final_video.mp4', 'rb') as vid:
-        res = requests.post(tg_url, data={'chat_id': chat_id, 'caption': caption_text}, files={'video': vid}, timeout=600)
-        
-        if res.status_code != 200:
-            print("File too large for direct upload. Using tmpfiles...")
-            upload_res = requests.post("https://tmpfiles.org/api/v1/upload", files={'file': open('final_video.mp4', 'rb')}, timeout=600).json()
-            link = upload_res['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
-            fallback_text = f"🎬 {seo_title}\n\n📝 {seo_desc}\n\n🔗 Video File (>50MB): {link}"
-            requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": fallback_text})
+    # Strictly adhering to SEO limits
+    seo_title = f"{MAIN_TOPIC} Explained in Hindi"[:60].strip()
+    seo_desc = f"Learn how {MAIN_TOPIC.lower()} works in this engineering breakdown. Complete mechanism explained in Hindi."[:160].strip()
+    
+    # Generate Cinematic Thumbnail Prompt
+    thumb_prompt = f"Cinematic wide shot of {MAIN_TOPIC}, hyper-detailed, 8k resolution, Unreal Engine 5 render, dramatic lighting, highly intricate, technological masterpiece, no text, no CGI artifacts."
+    
+    # Generate Hashtags
+    topic_hash = MAIN_TOPIC.replace(" ", "")
+    hashtags = f"#EngineeringDecode #{topic_hash} #TechHindi #EngineeringExplained"
+    
+    # EXACT Pipe-Separated Format as shown in your screenshots
+    final_message = f"READY_TO_UPLOAD|{video_link}|{seo_title}|{thumb_prompt}|{seo_desc} {hashtags}"
+    
+    print("Sending formatted message to Telegram...")
+    requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": final_message})
 
 except Exception as e:
     print(f"Notification Error: {e}")
