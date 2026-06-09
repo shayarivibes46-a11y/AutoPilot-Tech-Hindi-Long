@@ -7,11 +7,18 @@ pexels_key = os.environ.get('PEXELS_API_KEY')
 bot_token = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg"
 chat_id = os.environ.get('CHAT_ID')
 
-# Universal Topic Derivation
-MAIN_TOPIC = scenes_data[0].get('keyword', 'Fascinating Facts').title() if scenes_data else 'Fascinating Facts'
+# --- TOPIC FIX ---
+# Ab script GitHub Environment se exact 'VIDEO_TOPIC' uthayegi. 
+# Agar wo nahi milta, tabhi fallback ke taur par pehle scene ka keyword use karegi.
+exact_topic = os.environ.get('VIDEO_TOPIC')
+if exact_topic and exact_topic.strip() != "":
+    MAIN_TOPIC = exact_topic.title()
+else:
+    MAIN_TOPIC = scenes_data[0].get('keyword', 'Engineering Concepts').title() if scenes_data else 'Engineering Concepts'
+
 
 def fetch_pexels_video(keyword):
-    """Smart Pexels Fetcher: Universal fallback approach, enforces HD Landscape"""
+    """Smart Pexels Fetcher: Enforces HD Landscape"""
     clean_keyword = re.sub(r'[^\w\s]', '', keyword).strip()
     first_word = clean_keyword.split()[0] if " " in clean_keyword else ""
     search_terms = [clean_keyword, first_word, MAIN_TOPIC, "technology background"]
@@ -42,7 +49,7 @@ def process_scene(i, scene, retry=3):
             scene_filename = f"scene_{i}.mp4"
             raw_video = f"raw_{i}.mp4"
             
-            # 1. TTS Generation
+            # 1. TTS Generation (Ensuring no internal prompt markers leak)
             text_clean = re.sub(r'[^\w\s.,?!-]', '', scene.get('text', '').replace('&', ' aur ')).strip()
             with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_clean)
             subprocess.run([sys.executable, '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
@@ -55,7 +62,6 @@ def process_scene(i, scene, retry=3):
             if vid_url:
                 with open(raw_video, "wb") as f: f.write(requests.get(vid_url, timeout=30).content)
                 if os.path.getsize(raw_video) > 1000:
-                    # Added '-stream_loop', '-1' before input to loop short Pexels clips for long TTS scenes
                     subprocess.run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', raw_video, '-t', str(dur), '-vf', 'scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fps=25', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
                     return {"vid": scene_filename, "aud": audio_path, "index": i}
             raise Exception("Video download failed or file corrupt")
@@ -87,10 +93,10 @@ with open("list_a.txt", "w") as f:
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_v.txt', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'v_merged.mp4'], check=True)
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_a.txt', '-c:a', 'pcm_s16le', 'a_merged.wav'], check=True)
 
-# --- STUDIO PIPELINE: BGM INCREASED TO 0.06 & DUCKING ---
+# --- STUDIO PIPELINE: AUDIO DUCKING (BGM = 0.06) ---
 studio_filter = (
     "[1:a]asplit=2[voice_main][voice_control];"
-    "[2:a]volume=0.06[bgm_low];" # <-- BGM Volume increased here
+    "[2:a]volume=0.06[bgm_low];"
     "[bgm_low][voice_control]sidechaincompress=threshold=0.05:ratio=12[ducked_bgm];"
     "[voice_main][ducked_bgm]amix=inputs=2:duration=first[aout];"
     "[0:v]drawtext=text='Engineering Decode':x=w-tw-50:y=h-th-50:fontsize=48:fontcolor=white@0.5[vout]"
@@ -111,18 +117,22 @@ subprocess.run([
     '-c:v', 'libx264', '-pass', '2', '-b:v', '2M', '-preset', 'slow', '-c:a', 'aac', '-async', '1', '-shortest', 'final_video.mp4'
 ], check=True)
 
-# --- UPLOAD & FORMATTED NOTIFICATION ---
+# --- UPLOAD & EXACT TOPIC NOTIFICATION ---
 try:
     print("Uploading final video to tmpfiles...")
     upload_res = requests.post("https://tmpfiles.org/api/v1/upload", files={'file': open('final_video.mp4', 'rb')}, timeout=600).json()
     video_link = upload_res['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
     
+    # Strict SEO Metadata exactly matching the User's input topic
     seo_title = f"{MAIN_TOPIC} Explained in Hindi"[:60].strip()
     seo_desc = f"Learn how {MAIN_TOPIC.lower()} works in this engineering breakdown. Complete mechanism explained in Hindi."[:160].strip()
     thumb_prompt = f"Cinematic wide shot of {MAIN_TOPIC}, hyper-detailed, 8k resolution, Unreal Engine 5 render, dramatic lighting, highly intricate, technological masterpiece, no text, no CGI artifacts."
+    
+    # Clean hashtags (removing spaces from the dynamic topic)
     topic_hash = MAIN_TOPIC.replace(" ", "")
     hashtags = f"#EngineeringDecode #{topic_hash} #TechHindi #EngineeringExplained"
     
+    # Final Pipe-Separated String
     final_message = f"READY_TO_UPLOAD|{video_link}|{seo_title}|{thumb_prompt}|{seo_desc} {hashtags}"
     
     print("Sending formatted message to Telegram...")
