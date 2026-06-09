@@ -8,25 +8,22 @@ bot_token = "8870266304:AAHHYfQvtQEWMIEzMfdEc7i_9hIzj7nz0Zg"
 chat_id = os.environ.get('CHAT_ID')
 
 # Derive Main Topic for Universal Fallback
-MAIN_TOPIC = scenes_data[0].get('keyword', 'Education').title() if scenes_data else 'Education'
+MAIN_TOPIC = scenes_data[0].get('keyword', 'Engineering Topic').title() if scenes_data else 'Engineering Topic'
 
 def fetch_pexels_video(keyword):
     """Smart Pexels Fetcher: Tries exact keyword, then broader terms, enforces HD Landscape"""
-    # Create search fallback list to ensure we get a relevant video
     clean_keyword = re.sub(r'[^\w\s]', '', keyword).strip()
     first_word = clean_keyword.split()[0] if " " in clean_keyword else ""
-    
-    search_terms = [clean_keyword, first_word, MAIN_TOPIC, "background"]
+    search_terms = [clean_keyword, first_word, MAIN_TOPIC, "technology background"]
     
     for term in search_terms:
         if not term: continue
         try:
-            # Request Landscape orientation specifically
             url = f"https://api.pexels.com/videos/search?query={term}&per_page=5&orientation=landscape"
             res = requests.get(url, headers={"Authorization": pexels_key}, timeout=20).json()
             
             if 'videos' in res and len(res['videos']) > 0:
-                # 1. Try to find an HD video first
+                # 1. Try to find an HD video first (1280px or higher)
                 for vid in res['videos']:
                     for file in vid['video_files']:
                         if file['quality'] == 'hd' and file['width'] >= 1280:
@@ -36,7 +33,6 @@ def fetch_pexels_video(keyword):
                 # 2. If no HD, return the highest available
                 print(f"DEBUG: Found standard Video for '{term}'")
                 return res['videos'][0]['video_files'][0]['link']
-                
         except Exception as e:
             print(f"Pexels Fetch Error for '{term}': {e}")
             
@@ -59,7 +55,7 @@ def process_scene(i, scene, retry=3):
             
             dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]).decode().strip())
             
-            # 2. Fetch Relevant Video
+            # 2. Fetch & Normalize Video
             vid_url = fetch_pexels_video(scene.get('keyword', MAIN_TOPIC))
             if vid_url:
                 with open(raw_video, "wb") as f: f.write(requests.get(vid_url, timeout=30).content)
@@ -96,16 +92,24 @@ with open("list_a.txt", "w") as f:
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_v.txt', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'v_merged.mp4'], check=True)
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_a.txt', '-c:a', 'pcm_s16le', 'a_merged.wav'], check=True)
 
-# --- STUDIO PIPELINE: AUDIO DUCKING & 2-PASS ENCODING ---
+# --- STUDIO PIPELINE: CORRECTED AUDIO DUCKING & 2-PASS ENCODING ---
+# Correctly routed sidechain filter to fix 'unconnected output' error
 studio_filter = (
-    "[1:a]asplit=2[voicetts][vsidechain];"
-    "[vsidechain]sidechaincompress=threshold=0.05:ratio=10[comp_music];"
-    "[2:a][comp_music]amix=inputs=2:duration=first[aout];"
+    "[1:a]asplit=2[voice_main][voice_control];"
+    "[2:a][voice_control]sidechaincompress=threshold=0.05:ratio=10[ducked_bgm];"
+    "[voice_main][ducked_bgm]amix=inputs=2:duration=first[aout];"
     "[0:v]drawtext=text='Engineering Decode':x=w-tw-50:y=h-th-50:fontsize=48:fontcolor=white@0.5[vout]"
 )
 
-subprocess.run(['ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3', '-filter_complex', studio_filter, '-c:v', 'libx264', '-b:v', '2M', '-pass', '1', '-f', 'null', '/dev/null'], check=True)
+# Pass 1
+subprocess.run([
+    'ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3', 
+    '-filter_complex', studio_filter, 
+    '-map', '[vout]', 
+    '-c:v', 'libx264', '-b:v', '2M', '-pass', '1', '-f', 'null', '/dev/null'
+], check=True)
 
+# Pass 2
 subprocess.run([
     'ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3',
     '-filter_complex', studio_filter,
