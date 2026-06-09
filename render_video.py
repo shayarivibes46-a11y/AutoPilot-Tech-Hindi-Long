@@ -50,12 +50,13 @@ def process_scene(i, scene, retry=3):
             
             dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]).decode().strip())
             
-            # 2. Fetch & Normalize Video
+            # 2. Fetch & Normalize Video (WITH LONG-FORM CONTINUOUS LOOPING)
             vid_url = fetch_pexels_video(scene.get('keyword', MAIN_TOPIC))
             if vid_url:
                 with open(raw_video, "wb") as f: f.write(requests.get(vid_url, timeout=30).content)
                 if os.path.getsize(raw_video) > 1000:
-                    subprocess.run(['ffmpeg', '-y', '-i', raw_video, '-t', str(dur), '-vf', 'scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fps=25', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
+                    # Added '-stream_loop', '-1' before input to loop short Pexels clips for long TTS scenes
+                    subprocess.run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', raw_video, '-t', str(dur), '-vf', 'scale=1280:720:force_original_aspect_ratio=increase,crop=1280:720,fps=25', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
                     return {"vid": scene_filename, "aud": audio_path, "index": i}
             raise Exception("Video download failed or file corrupt")
         except Exception as e:
@@ -86,11 +87,10 @@ with open("list_a.txt", "w") as f:
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_v.txt', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'v_merged.mp4'], check=True)
 subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_a.txt', '-c:a', 'pcm_s16le', 'a_merged.wav'], check=True)
 
-# --- STUDIO PIPELINE: LOW BGM AUDIO DUCKING & 2-PASS ENCODING ---
-# BGM volume is first reduced to 0.02, then ducked further when voice comes
+# --- STUDIO PIPELINE: BGM INCREASED TO 0.06 & DUCKING ---
 studio_filter = (
     "[1:a]asplit=2[voice_main][voice_control];"
-    "[2:a]volume=0.02[bgm_low];"
+    "[2:a]volume=0.06[bgm_low];" # <-- BGM Volume increased here
     "[bgm_low][voice_control]sidechaincompress=threshold=0.05:ratio=12[ducked_bgm];"
     "[voice_main][ducked_bgm]amix=inputs=2:duration=first[aout];"
     "[0:v]drawtext=text='Engineering Decode':x=w-tw-50:y=h-th-50:fontsize=48:fontcolor=white@0.5[vout]"
@@ -111,24 +111,18 @@ subprocess.run([
     '-c:v', 'libx264', '-pass', '2', '-b:v', '2M', '-preset', 'slow', '-c:a', 'aac', '-async', '1', '-shortest', 'final_video.mp4'
 ], check=True)
 
-# --- UPLOAD & FORMATTED NOTIFICATION (Match EarnSmart & AIToolkit) ---
+# --- UPLOAD & FORMATTED NOTIFICATION ---
 try:
     print("Uploading final video to tmpfiles...")
     upload_res = requests.post("https://tmpfiles.org/api/v1/upload", files={'file': open('final_video.mp4', 'rb')}, timeout=600).json()
     video_link = upload_res['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
     
-    # Strictly adhering to SEO limits
     seo_title = f"{MAIN_TOPIC} Explained in Hindi"[:60].strip()
     seo_desc = f"Learn how {MAIN_TOPIC.lower()} works in this engineering breakdown. Complete mechanism explained in Hindi."[:160].strip()
-    
-    # Generate Cinematic Thumbnail Prompt
     thumb_prompt = f"Cinematic wide shot of {MAIN_TOPIC}, hyper-detailed, 8k resolution, Unreal Engine 5 render, dramatic lighting, highly intricate, technological masterpiece, no text, no CGI artifacts."
-    
-    # Generate Hashtags
     topic_hash = MAIN_TOPIC.replace(" ", "")
     hashtags = f"#EngineeringDecode #{topic_hash} #TechHindi #EngineeringExplained"
     
-    # EXACT Pipe-Separated Format as shown in your screenshots
     final_message = f"READY_TO_UPLOAD|{video_link}|{seo_title}|{thumb_prompt}|{seo_desc} {hashtags}"
     
     print("Sending formatted message to Telegram...")
