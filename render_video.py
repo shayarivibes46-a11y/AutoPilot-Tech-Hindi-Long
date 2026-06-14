@@ -55,7 +55,20 @@ def process_scene(i, scene):
         text_clean = re.sub(r'[^\w\s.,?!-]', '', scene.get('text', '').replace('&', ' aur ')).strip()
         with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_clean)
         subprocess.run(['python', '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
-        subprocess.run(['ffmpeg', '-y', '-i', f"raw_{i}.mp3", '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path], check=True)
+        
+        # FIX: Mix whoosh and pop sound effects with the generated TTS audio
+        # Whoosh starts at 0ms, Pop starts at 500ms delay. Volume adjusted to balance with TTS.
+        audio_filter = "[1:a]volume=0.3[w];[2:a]volume=0.3,adelay=500|500[p];[0:a][w][p]amix=inputs=3:duration=first[aout];[aout]volume=3[final_aout]"
+        subprocess.run([
+            'ffmpeg', '-y', 
+            '-i', f"raw_{i}.mp3", 
+            '-i', 'whoosh.mp3', 
+            '-i', 'pop.mp3', 
+            '-filter_complex', audio_filter, 
+            '-map', '[final_aout]', 
+            '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path
+        ], check=True)
+        
         dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]).decode().strip())
         
         # Download & Zoom
