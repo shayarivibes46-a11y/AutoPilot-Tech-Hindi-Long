@@ -56,9 +56,8 @@ def process_scene(i, scene):
         with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_clean)
         subprocess.run(['python', '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
         
-        # FIX: Mix whoosh and pop sound effects with the generated TTS audio
-        # Whoosh starts at 0ms, Pop starts at 500ms delay. Volume adjusted to balance with TTS.
-        audio_filter = "[1:a]volume=0.3[w];[2:a]volume=0.3,adelay=500|500[p];[0:a][w][p]amix=inputs=3:duration=first[aout];[aout]volume=3[final_aout]"
+        # FIX: Added normalize=0 to amix so TTS volume doesn't fluctuate when SFX plays
+        audio_filter = "[1:a]volume=0.3[w];[2:a]volume=0.3,adelay=500|500[p];[0:a][w][p]amix=inputs=3:duration=first:normalize=0[aout];[aout]volume=1.2[final_aout]"
         subprocess.run([
             'ffmpeg', '-y', 
             '-i', f"raw_{i}.mp3", 
@@ -96,8 +95,8 @@ try:
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_v.txt', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'v_merged.mp4'], check=True)
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_a.txt', '-c:a', 'pcm_s16le', 'a_merged.wav'], check=True)
 
-    # Studio Rendering - OPTIMIZED BITRATE HERE (BGM volume increased to 0.45 and Watermark fontsize reduced to 32)
-    studio_filter = "[1:a]asplit=2[voice_main][voice_control];[2:a]volume=0.45[bgm_low];[bgm_low][voice_control]sidechaincompress=threshold=0.05:ratio=12[ducked_bgm];[voice_main][ducked_bgm]amix=inputs=2:duration=first[aout];[0:v]drawtext=text='Engineering Decode':x=w-tw-50:y=h-th-50:fontsize=32:fontcolor=white@0.5[vout]"
+    # Studio Rendering - Added normalize=0 to amix to fix volume jumping
+    studio_filter = "[1:a]asplit=2[voice_main][voice_control];[2:a]volume=0.45[bgm_low];[bgm_low][voice_control]sidechaincompress=threshold=0.05:ratio=12[ducked_bgm];[voice_main][ducked_bgm]amix=inputs=2:duration=first:normalize=0[aout];[0:v]drawtext=text='Engineering Decode':x=w-tw-50:y=h-th-50:fontsize=32:fontcolor=white@0.5[vout]"
     
     # Decreased -b:v to 1.2M to solve Payload Too Large error
     subprocess.run(['ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3', '-filter_complex', studio_filter, '-map', '[vout]', '-map', '[aout]', '-c:v', 'libx264', '-b:v', '1.2M', '-preset', 'medium', '-c:a', 'aac', '-shortest', 'final_video.mp4'], check=True)
