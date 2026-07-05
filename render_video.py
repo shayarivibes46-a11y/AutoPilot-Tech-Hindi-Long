@@ -101,19 +101,33 @@ try:
     # Decreased -b:v to 1.2M to solve Payload Too Large error
     subprocess.run(['ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3', '-filter_complex', studio_filter, '-map', '[vout]', '-map', '[aout]', '-c:v', 'libx264', '-b:v', '1.2M', '-preset', 'medium', '-c:a', 'aac', '-shortest', 'final_video.mp4'], check=True)
 
-    # UPLOAD
-    print("Uploading final video...")
-    resp = requests.post("https://tmpfiles.org/api/v1/upload", files={'file': open('final_video.mp4', 'rb')}, timeout=600)
+    # ==========================================
+    # GITHUB RELEASES UPLOAD (NEW METHOD)
+    # ==========================================
+    print("\n🚀 Uploading Video directly to GitHub Releases...")
     
-    if resp.status_code == 200:
-        video_link = resp.json()['data']['url'].replace('tmpfiles.org/', 'tmpfiles.org/dl/')
+    run_id = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
+    tag_name = f"vid-{run_id}"
+    
+    # Yahan "amu8085-lab/my-project1" ki jagah apne repo ka asali naam dal dena ya GitHub se environment variable ke through automatically fetch karne dena.
+    repo_name = os.environ.get('GITHUB_REPOSITORY', "amu8085-lab/my-project1") 
+    
+    cmd = ['gh', 'release', 'create', tag_name, 'final_video.mp4', '--repo', repo_name, '--notes', 'Automated Video Render']
+    
+    # Synchronous subprocess run taaki baaki script ki flow bani rahe
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if proc.returncode == 0:
+        video_link = f"https://github.com/{repo_name}/releases/download/{tag_name}/final_video.mp4"
+        print(f"✅ Success! Video uploaded to GitHub: {video_link}")
         
-        # Yahan dynamic variables use ho rahe hain jo n8n se aaye hain
-        final_msg = f"READY_TO_UPLOAD|{video_link}|{video_title}|{thumbnail_prompt}|{video_desc}"
-        
+        # Safe character replacement just like the original async file
+        final_msg = f"READY_TO_UPLOAD|{video_link}|{video_title.replace('|', '')}|{thumbnail_prompt.replace('|', '')}|{video_desc.replace('|', '')}"
         requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": final_msg})
     else:
-        raise Exception(f"Upload API Error {resp.status_code}: {resp.text}")
+        err_msg = proc.stderr.strip()
+        print(f"❌ GitHub Release failed. Error: {err_msg}")
+        raise Exception(f"Upload API Error: {err_msg}")
 
 except Exception as e:
     error_msg = f"🚨 *PIPELINE FAILED!*\n*Error:* `{str(e)[:100]}`"
