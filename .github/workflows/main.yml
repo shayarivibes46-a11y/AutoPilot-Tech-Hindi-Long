@@ -4,6 +4,10 @@ on:
   repository_dispatch:
     types: [render_and_upload]
 
+# 👇 YEH BLOCK ADD KIYA GAYA HAI (Releases create karne ki permission) 👇
+permissions:
+  contents: write
+
 jobs:
   build_video:
     runs-on: ubuntu-latest
@@ -37,4 +41,6 @@ jobs:
           DESCRIPTION: ${{ github.event.client_payload.description }}
           THUMBNAIL_PROMPT: ${{ github.event.client_payload.thumbnail_prompt }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }} 
+          # 👇 YEH LINE ADD KI GAYI HAI 👇
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python render_video.py
