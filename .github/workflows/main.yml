@@ -44,3 +44,12 @@ jobs:
           # 👇 YEH LINE ADD KI GAYI HAI 👇
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python render_video.py
+
+      # 👇 NAYA AUTO-DELETE BLOCK YAHAN HAI 👇
+      - name: Auto-delete older releases
+        uses: dev-drprasad/delete-older-releases@v0.3.3
+        with:
+          keep_latest: 3
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
