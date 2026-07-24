@@ -62,8 +62,8 @@ def process_scene(i, scene):
         subprocess.run([
             'ffmpeg', '-y', 
             '-i', f"raw_{i}.mp3", 
-            '-i', 'whoosh.mp3", 
-            '-i', 'pop.mp3", 
+            '-i', 'whoosh.mp3', 
+            '-i', 'pop.mp3', 
             '-filter_complex', audio_filter, 
             '-map', '[final_aout]', 
             '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path
