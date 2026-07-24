@@ -24,7 +24,8 @@ except json.JSONDecodeError as e:
     raise e
 
 # --- TOPIC & HASHTAG SETUP ---
-MAIN_TOPIC = os.environ.get('VIDEO_TOPIC', scenes_data[0].get('keyword', 'Engineering')).strip().title()
+# FIX: 'keyword' ko 'b_roll_visual' mein badla gaya
+MAIN_TOPIC = os.environ.get('VIDEO_TOPIC', scenes_data[0].get('b_roll_visual', 'Engineering')).strip().title()
 clean_words = [re.sub(r'[^A-Za-z0-9]', '', w) for w in MAIN_TOPIC.split()]
 topic_hash = "".join([w for w in clean_words if w][:3])
 
@@ -61,8 +62,8 @@ def process_scene(i, scene):
         subprocess.run([
             'ffmpeg', '-y', 
             '-i', f"raw_{i}.mp3", 
-            '-i', 'whoosh.mp3', 
-            '-i', 'pop.mp3', 
+            '-i', 'whoosh.mp3", 
+            '-i', 'pop.mp3", 
             '-filter_complex', audio_filter, 
             '-map', '[final_aout]', 
             '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path
@@ -71,7 +72,8 @@ def process_scene(i, scene):
         dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]).decode().strip())
         
         # Download & Zoom
-        urls = fetch_multiple_pexels_videos(scene.get('keyword', MAIN_TOPIC))
+        # FIX: 'keyword' ko 'b_roll_visual' mein badla gaya
+        urls = fetch_multiple_pexels_videos(scene.get('b_roll_visual', MAIN_TOPIC))
         if not urls: raise Exception("No video found")
         
         raw_clip = f"raw_{i}.mp4"
@@ -79,7 +81,8 @@ def process_scene(i, scene):
         vf_string = "zoompan=z='min(max(zoom,pzoom)+0.001,1.1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=25"
         subprocess.run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', raw_clip, '-t', str(dur), '-vf', vf_string, '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
         
-        return {"vid": scene_filename, "aud": audio_path, "index": i, "dur": dur, "keyword": scene.get('keyword', MAIN_TOPIC)}
+        # FIX: 'keyword' ko 'b_roll_visual' mein badla gaya
+        return {"vid": scene_filename, "aud": audio_path, "index": i, "dur": dur, "keyword": scene.get('b_roll_visual', MAIN_TOPIC)}
     except Exception as e:
         print(f"Scene {i} failed: {e}")
         return None
