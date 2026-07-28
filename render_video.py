@@ -17,7 +17,7 @@ pexels_key = os.environ.get('PEXELS_API_KEY')
 chat_id = os.environ.get('CHAT_ID')
 telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
 
-# Concurrency limiter: Changed to 2 to prevent GitHub Actions CPU Overload & "No space left" error
+# Concurrency limiter: Kept at 2 to prevent GitHub Actions CPU Overload & "No space left" error
 MAX_CONCURRENT_SCENES = 2 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCENES)
 
@@ -39,14 +39,13 @@ def load_scenes_data():
         return []
 
 def get_audio_duration(file_path):
-    """Helper function to get precise audio duration to prevent FFmpeg loop hangs."""
     try:
         cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         return float(result.stdout.strip())
     except Exception as e:
         print(f"Error getting audio duration: {e}")
-        return 5.0 # Fallback 5 seconds
+        return 5.0 
 
 async def generate_tts(text, output_path, voice="hi-IN-MadhurNeural"):
     try:
@@ -59,7 +58,6 @@ async def generate_tts(text, output_path, voice="hi-IN-MadhurNeural"):
 
 async def fetch_pexels_video(session, query, output_path):
     if not pexels_key: return False
-    # Changed orientation to landscape for 16:9
     url = f"https://api.pexels.com/videos/search?query={query}&per_page=3&orientation=landscape"
     try:
         async with session.get(url, headers={"Authorization": pexels_key}) as resp:
@@ -67,7 +65,6 @@ async def fetch_pexels_video(session, query, output_path):
                 data = await resp.json()
                 videos = data.get('videos', [])
                 if videos:
-                    # Get HD link
                     files = videos[0].get('video_files', [])
                     link = next((vf['link'] for vf in files if vf.get('quality') == 'hd'), None)
                     if not link and files: link = files[0]['link']
@@ -82,7 +79,7 @@ async def fetch_pexels_video(session, query, output_path):
     return False
 
 async def process_scene(index, scene, session):
-    async with semaphore: # Limit parallel execution to save disk space & CPU
+    async with semaphore:
         scene_id = index + 1
         raw_text = str(scene.get('text', '')).strip()
         search_query = scene.get('search_query', scene.get('keyword', 'technology'))
@@ -95,42 +92,71 @@ async def process_scene(index, scene, session):
         
         print(f"\n--- Processing Scene {scene_id} ---")
         
-        # 1. Generate TTS
         if not await generate_tts(text_line, audio_file): return None
             
-        # 2. Fetch Video
         if not await fetch_pexels_video(session, search_query, video_file):
-            # Changed resolution to 1920x1080 for 16:9
             subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1920x1080:r=30', '-t', '10', video_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-        # 3. Merge Audio and Video
-        print(f"Merging Video and Audio for Scene {scene_id}...")
+        print(f"Merging Video, Audio, Effects & Watermark for Scene {scene_id}...")
         
-        # Calculate accurate duration to prevent FFmpeg infinite loops
         audio_duration = get_audio_duration(audio_file)
         
-        cmd_merge = [
-            'ffmpeg', '-y', 
-            '-stream_loop', '-1', 
-            '-i', video_file, 
-            '-i', audio_file, 
-            '-t', str(audio_duration),        # Using precise duration instead of -shortest
-            # Changed scale and crop parameters to 1920:1080 for 16:9
-            '-vf', 'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30', 
-            '-c:v', 'libx264',                # Re-encoding to match formats
-            '-preset', 'ultrafast',           # Added for speed
-            '-crf', '28',                     # Added for consistent compression
+        # Check if effect files exist
+        has_whoosh = os.path.exists("whoosh.mp3")
+        has_pop = os.path.exists("pop.mp3")
+        
+        # Base FFmpeg command setup
+        cmd_merge = ['ffmpeg', '-y', '-stream_loop', '-1', '-i', video_file, '-i', audio_file]
+        
+        if has_whoosh: cmd_merge.extend(['-i', 'whoosh.mp3'])
+        if has_pop: cmd_merge.extend(['-i', 'pop.mp3'])
+        
+        # Filter Complex for Watermark + Audio Mixing
+        # Watermark: Transparent (white@0.4), Bottom Right (x=w-tw-40:y=h-th-40)
+        v_filter = "[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30,drawtext=text='Decode Engineering®':fontcolor=white@0.4:fontsize=60:x=w-tw-40:y=h-th-40[v]"
+        
+        # Audio Mixing Setup
+        a_filter_parts = ["[1:a]volume=1.0[a1]"]
+        amix_count = 1
+        mix_labels = "[a1]"
+        
+        if has_whoosh:
+            amix_count += 1
+            idx = cmd_merge.index('whoosh.mp3') // 2
+            a_filter_parts.append(f"[{idx}:a]volume=0.8[a2]")
+            mix_labels += "[a2]"
+            
+        if has_pop:
+            amix_count += 1
+            idx = cmd_merge.index('pop.mp3') // 2
+            a_filter_parts.append(f"[{idx}:a]volume=0.8[a3]")
+            mix_labels += "[a3]"
+            
+        if amix_count > 1:
+            a_filter = f"{';'.join(a_filter_parts)};{mix_labels}amix=inputs={amix_count}:duration=first:dropout_transition=0[a]"
+        else:
+            a_filter = f"{a_filter_parts[0]};[a1]anull[a]"
+            
+        filter_complex = f"{v_filter};{a_filter}"
+        
+        # Add rest of the parameters
+        cmd_merge.extend([
+            '-t', str(audio_duration),
+            '-filter_complex', filter_complex,
+            '-map', '[v]',
+            '-map', '[a]',
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '28',
             '-pix_fmt', 'yuv420p',
-            '-c:a', 'aac', 
+            '-c:a', 'aac',
             '-ar', '44100',
             '-ac', '2',
-            '-map', '0:v:0', 
-            '-map', '1:a:0', 
             merged_video
-        ]
+        ])
+        
         subprocess.run(cmd_merge, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
-        # 4. STORAGE FIX: Delete raw files immediately after merging
         if os.path.exists(audio_file): os.remove(audio_file)
         if os.path.exists(video_file): os.remove(video_file)
             
@@ -163,7 +189,6 @@ async def send_to_telegram(video_url):
     if not telegram_token or not chat_id: return
     url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
     
-    # Text format required by n8n Router
     message_text = f"READY_TO_UPLOAD|{video_url}|{title}|{thumbnail_prompt}|{description}"
     payload = {"chat_id": chat_id, "text": message_text}
     
@@ -196,10 +221,31 @@ async def main():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         if os.path.exists(final_video):
-            # Clean up intermediate merged files to free up space
+            # Clean up intermediate scene files
             for scene in valid_scenes:
                 if os.path.exists(scene['video']): os.remove(scene['video'])
             if os.path.exists(concat_file): os.remove(concat_file)
+            
+            # --- NEW STEP: Add Background Music ---
+            if os.path.exists("bgm.mp3"):
+                print("🎵 Adding Background Music...")
+                final_with_bgm = "final_output_with_bgm.mp4"
+                
+                # Loops BGM (-stream_loop -1) and mixes it with the main video audio at 10% volume
+                bgm_cmd = [
+                    'ffmpeg', '-y', 
+                    '-i', final_video, 
+                    '-stream_loop', '-1', '-i', 'bgm.mp3',
+                    '-filter_complex', "[1:a]volume=0.1[bgm];[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=0[a]",
+                    '-map', '0:v', '-map', '[a]',
+                    '-c:v', 'copy',
+                    '-c:a', 'aac', '-ar', '44100', '-ac', '2',
+                    final_with_bgm
+                ]
+                subprocess.run(bgm_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                if os.path.exists(final_with_bgm):
+                    os.replace(final_with_bgm, final_video)
                 
             print("🚀 Uploading final video and triggering n8n...")
             video_url = await upload_to_github_release(final_video)
