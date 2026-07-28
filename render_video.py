@@ -1,172 +1,265 @@
-import os, sys, requests, json, subprocess, re, gc, time, traceback
-import random
+import os, sys, json, subprocess, time, random, asyncio, re, string
+import aiohttp
+import edge_tts
+import shutil
 
-# --- CONFIG & INPUT HANDLING ---
-raw_scenes = os.environ.get('SCENES_DATA')
-pexels_key = os.environ.get('PEXELS_API_KEY')
-bot_token = "8952624775:AAFXQXosY1GIsVvWgeqWi4L2LE1LoQnPc3Q"
-chat_id = os.environ.get('CHAT_ID')
-
-# Naye environment variables fetch karein (GitHub Action se)
-video_title = os.environ.get('TITLE', 'Engineering Video')
+# --- VARIABLES ---
+scenes_data = json.loads(os.environ.get('SCENES_DATA', '[]'))
+title = os.environ.get('TITLE', 'Engineering Video')
+description = os.environ.get('DESCRIPTION', 'Educational video')
 thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic engineering thumbnail')
-video_desc = os.environ.get('DESCRIPTION', 'Educational video')
+pexels_key = os.environ.get('PEXELS_API_KEY')
+chat_id = os.environ.get('CHAT_ID')
+telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
 
-# Validate input
-if not raw_scenes:
-    print("FATAL: SCENES_DATA environment variable is missing.")
-    sys.exit(1)
+# 👇 Yahan Decode Engineering channel name set kiya gaya hai 👇
+channel_name = "Decode Engineering" 
 
-try:
-    scenes_data = json.loads(raw_scenes)
-except json.JSONDecodeError as e:
-    print(f"FATAL: JSON Decode Error. Input: {raw_scenes}")
-    raise e
+print(f"DEBUG: Processing {len(scenes_data)} scenes async...")
 
-# --- TOPIC & HASHTAG SETUP ---
-MAIN_TOPIC = os.environ.get('VIDEO_TOPIC', scenes_data[0].get('b_roll_visual', 'Engineering')).strip().title()
-clean_words = [re.sub(r'[^A-Za-z0-9]', '', w) for w in MAIN_TOPIC.split()]
-topic_hash = "".join([w for w in clean_words if w][:3])
-
-# --- SMART DYNAMIC FALLBACK KEYWORDS ---
+# --- SMART DYNAMIC FALLBACK KEYWORDS (ENGINEERING SPECIFIC) ---
 fallback_env = os.environ.get('FALLBACK_KEYWORDS', 'technology background, abstract engineering, circuit board, digital data, server room')
 FALLBACK_KEYWORDS = [kw.strip() for kw in fallback_env.split(',')]
 
-# --- FETCH ENGINE ---
-def fetch_multiple_pexels_videos(keyword, count=1):
-    search_terms = [keyword] + FALLBACK_KEYWORDS
-    videos_found = []
-    for term in search_terms:
+TEMP_DIR = "/dev/shm" if os.path.exists("/dev/shm") else os.getcwd()
+
+async def fetch_pexels_video(session, keyword):
+    queries_to_try = [keyword] + FALLBACK_KEYWORDS
+    for query in queries_to_try:
         for attempt in range(2):
             try:
-                time.sleep(random.uniform(0.1, 0.5))
-                random_page = random.randint(1, 2) if attempt == 0 else 1
-                url = f"https://api.pexels.com/videos/search?query={term}&per_page=15&page={random_page}&orientation=landscape"
+                await asyncio.sleep(random.uniform(0.1, 0.5))
+                # Safe page fallback logic
+                random_page = random.randint(1, 2) if attempt == 0 else 1 
+                url = f"https://api.pexels.com/videos/search?query={query}&per_page=15&page={random_page}&orientation=landscape&size=large"
                 
-                response = requests.get(url, headers={"Authorization": pexels_key}, timeout=20)
-                
-                if response.status_code == 429:
-                    time.sleep(2)
-                    continue
-                
-                if response.status_code == 200:
-                    res = response.json()
-                    if 'videos' in res:
-                        for vid in res['videos']:
-                            for file in vid['video_files']:
-                                if file['quality'] == 'hd' and file['width'] >= 1280:
-                                    if file['link'] not in videos_found: videos_found.append(file['link'])
-                                    break
-                            if len(videos_found) >= count: return videos_found
-            except Exception: continue
-    return videos_found
+                async with session.get(url, headers={"Authorization": pexels_key}, timeout=10) as response:
+                    if response.status == 429:
+                        await asyncio.sleep(2)
+                        continue
+                        
+                    if response.status == 200:
+                        res = await response.json()
+                        if res.get('videos') and len(res['videos']) > 0:
+                            random_vid = random.choice(res['videos'])
+                            if random_vid.get('video_files'):
+                                # Quality preference: HD/UHD over SD
+                                hd_files = [f for f in random_vid['video_files'] if f['quality'] in ['hd', 'uhd']]
+                                best_file = hd_files[0] if hd_files else random_vid['video_files'][0]
+                                return best_file['link']
+            except Exception:
+                continue
+    return None
 
-# --- SCENE PROCESSING ---
-def process_scene(i, scene):
+async def get_audio_duration(file_path):
+    cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, _ = await proc.communicate()
     try:
-        audio_path, scene_filename = f"audio_{i}.wav", f"scene_{i}.mp4"
+        return float(stdout.decode().strip())
+    except:
+        return 5.0 
+
+async def process_scene(session, i, scene):
+    # Scene keyword check (b_roll_visual or keyword)
+    keyword = scene.get('keyword') or scene.get('b_roll_visual') or 'engineering'
+    
+    # Clean Hindi text for TTS engine
+    text_line = scene.get('text', '').replace('&', ' और ').strip()
+    text_line = re.sub(r'[^\w\s.,?!।\-\u200d\u200c]', '', text_line)
+    
+    if not text_line: return None
+    
+    scene_filename = os.path.join(TEMP_DIR, f"scene_{i}.mp4")
+    raw_mp3 = os.path.join(TEMP_DIR, f"raw_a_{i}.mp3")
+    vid_path = os.path.join(TEMP_DIR, f"raw_vid_{i}.mp4")
+    
+    try:
+        tts_success = False
+        for attempt in range(3):
+            try:
+                communicate = edge_tts.Communicate(text_line, "hi-IN-MadhurNeural")
+                await asyncio.wait_for(communicate.save(raw_mp3), timeout=15.0)
+                tts_success = True
+                break
+            except asyncio.TimeoutError:
+                print(f"TTS Timeout on attempt {attempt+1} for scene {i}. Retrying...")
+            except Exception as e:
+                print(f"TTS Attempt {attempt+1} failed for scene {i}: {str(e)}")
+                await asyncio.sleep(2)
+                
+        if not tts_success:
+            print(f"Skipping scene {i} due to continuous TTS failure.")
+            return None
+            
+        raw_dur = await get_audio_duration(raw_mp3)
+        dur = max(1.0, raw_dur - 0.2) 
+        fade_out = max(0, dur - 0.5)
         
-        # --- TTS FIXES APPLIED HERE ---
-        # 1. Added \u200d and \u200c to preserve Devnagari conjuncts (half-letters)
-        # 2. Added Hindi Purna Viram (।) for natural pauses
-        # 3. Changed '&' replacement from ' aur ' to Devanagari ' और '
-        text_clean = re.sub(r'[^\w\s.,?!।\-\u200d\u200c]', '', scene.get('text', '').replace('&', ' और ')).strip()
-        with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_clean)
-        
-        # 4. Removed artificial speed boost (--rate=+10%) to allow 100% natural, clear pronunciation
-        subprocess.run(['python', '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
-        
-        # 5. Adjusted volume=1.0 to eliminate digital clipping distortion
-        audio_filter = "[1:a]volume=0.3[w];[2:a]volume=0.3,adelay=500|500[p];[0:a][w][p]amix=inputs=3:duration=first:normalize=0[aout];[aout]volume=1.0[final_aout]"
-        subprocess.run([
-            'ffmpeg', '-y', 
-            '-i', f"raw_{i}.mp3", 
-            '-i', 'whoosh.mp3', 
-            '-i', 'pop.mp3', 
-            '-filter_complex', audio_filter, 
-            '-map', '[final_aout]', 
-            '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', audio_path
-        ], check=True)
-        
-        dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]).decode().strip())
-        
-        # Download & Zoom
+        # VIDEO FETCH & DOWNLOAD RETRY LOGIC
         is_valid_video = False
-        raw_clip = f"raw_{i}.mp4"
-        scene_keyword = scene.get('b_roll_visual', MAIN_TOPIC)
+        vid_url = await fetch_pexels_video(session, keyword)
         
         for download_attempt in range(3):
-            urls = fetch_multiple_pexels_videos(scene_keyword)
-            if not urls:
-                urls = fetch_multiple_pexels_videos(random.choice(FALLBACK_KEYWORDS))
+            if not vid_url:
+                vid_url = await fetch_pexels_video(session, random.choice(FALLBACK_KEYWORDS))
                 
-            if urls:
+            if vid_url:
                 try:
-                    req = requests.get(urls[0], timeout=30)
-                    if req.status_code == 200:
-                        if len(req.content) > 200000:
-                            with open(raw_clip, "wb") as f: f.write(req.content)
-                            is_valid_video = True
-                            break
-                        else:
-                            print(f"Video file too small ({len(req.content)} bytes) on attempt {download_attempt+1}, discarding.")
+                    async with session.get(vid_url, timeout=15) as resp:
+                        if resp.status == 200:
+                            vid_bytes = await resp.read()
+                            if len(vid_bytes) > 200000: # 200KB validation
+                                with open(vid_path, "wb") as f:
+                                    f.write(vid_bytes)
+                                is_valid_video = True
+                                break
+                            else:
+                                print(f"Video file too small ({len(vid_bytes)} bytes) on attempt {download_attempt+1}, discarding.")
                 except Exception as e:
                     print(f"Failed to download video for scene {i} on attempt {download_attempt+1}: {str(e)}")
             
-            scene_keyword = random.choice(FALLBACK_KEYWORDS)
+            vid_url = None
 
-        if not is_valid_video:
-            raise Exception("Failed to download a valid video after 3 attempts.")
+        pop_path = os.path.abspath("pop.mp3")
+        has_pop = os.path.exists(pop_path)
+
+        if is_valid_video:
+            cmd = ['ffmpeg', '-y', '-ignore_editlist', '1', '-stream_loop', '-1', '-fflags', '+genpts', '-i', vid_path, '-ss', '0.2', '-i', raw_mp3]
+            if has_pop: cmd += ['-i', pop_path]
+            v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,unsharp=5:5:0.5:5:5:0.0,eq=contrast=1.1:saturation=1.25,drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
+        else:
+            cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#151525:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
+            if has_pop: cmd += ['-i', pop_path]
+            v_filter = f"[0:v]drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
+
+        if has_pop:
+            a_filter = "[1:a]volume=1.0,apad[voice];[2:a]volume=0.8[pop];[voice][pop]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]"
+            filter_complex = f"{v_filter};{a_filter}"
+            a_map = '[aout]'
+        else:
+            a_filter = "[1:a]apad[aout]"
+            filter_complex = f"{v_filter};{a_filter}"
+            a_map = '[aout]'
+            
+        cmd += [
+            '-filter_complex', filter_complex,
+            '-map', '[v]', '-map', a_map,
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
+            '-c:a', 'aac', '-b:a', '192k', '-pix_fmt', 'yuv420p',
+            '-t', str(dur), scene_filename
+        ]
+            
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        await proc.communicate()
         
-        vf_string = "zoompan=z='min(max(zoom,pzoom)+0.001,1.1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=25"
-        subprocess.run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', raw_clip, '-t', str(dur), '-vf', vf_string, '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
+        return {"vid": scene_filename, "aud": raw_mp3, "index": i}
         
-        return {"vid": scene_filename, "aud": audio_path, "index": i, "dur": dur, "keyword": scene.get('b_roll_visual', MAIN_TOPIC)}
-    except Exception as e:
-        print(f"Scene {i} failed: {e}")
+    except Exception as e: 
+        print(f"Error in scene {i}: {str(e)}")
         return None
+    finally:
+        if os.path.exists(vid_path): os.remove(vid_path)
 
-# --- MAIN EXECUTION ---
-try:
-    results = [res for i, scene in enumerate(scenes_data) if (res := process_scene(i, scene))]
-    results.sort(key=lambda x: x['index'])
+async def run_ffmpeg_async(cmd):
+    proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    await proc.communicate()
 
-    # Merge
-    with open("list_v.txt", "w") as f: [f.write(f"file '{r['vid']}'\n") for r in results]
-    with open("list_a.txt", "w") as f: [f.write(f"file '{r['aud']}'\n") for r in results]
-    subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_v.txt', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'v_merged.mp4'], check=True)
-    subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_a.txt', '-c:a', 'pcm_s16le', 'a_merged.wav'], check=True)
-
-    # Studio Rendering
-    studio_filter = "[1:a]asplit=2[voice_main][voice_control];[2:a]volume=0.45[bgm_low];[bgm_low][voice_control]sidechaincompress=threshold=0.05:ratio=12[ducked_bgm];[voice_main][ducked_bgm]amix=inputs=2:duration=first:normalize=0[aout];[0:v]drawtext=text='Decode':x=w-tw-50:y=h-th-50:fontsize=32:fontcolor=white@0.5[vout]"
-    
-    subprocess.run(['ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3', '-filter_complex', studio_filter, '-map', '[vout]', '-map', '[aout]', '-c:v', 'libx264', '-b:v', '1.2M', '-preset', 'medium', '-c:a', 'aac', '-shortest', 'final_video.mp4'], check=True)
-
-    # ==========================================
-    # GITHUB RELEASES UPLOAD
-    # ==========================================
-    print("\n🚀 Uploading Video directly to GitHub Releases...")
-    
-    run_id = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
-    tag_name = f"vid-{run_id}"
-    
-    repo_name = os.environ.get('GITHUB_REPOSITORY', "shayarivibes46-a11y/AutoPilot-Tech-Hindi-Long") 
-    
-    cmd = ['gh', 'release', 'create', tag_name, 'final_video.mp4', '--repo', repo_name, '--notes', 'Automated Video Render']
-    
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if proc.returncode == 0:
-        video_link = f"https://github.com/{repo_name}/releases/download/{tag_name}/final_video.mp4"
-        print(f"✅ Success! Video uploaded to GitHub: {video_link}")
+async def main_pipeline():
+    async with aiohttp.ClientSession() as session:
+        sem = asyncio.Semaphore(4)
         
-        final_msg = f"READY_TO_UPLOAD|{video_link}|{video_title.replace('|', '')}|{thumbnail_prompt.replace('|', '')}|{video_desc.replace('|', '')}"
-        requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": final_msg})
-    else:
-        err_msg = proc.stderr.strip()
-        print(f"❌ GitHub Release failed. Error: {err_msg}")
-        raise Exception(f"Upload API Error: {err_msg}")
+        async def safe_process(session, i, scene):
+            async with sem:
+                return await process_scene(session, i, scene)
 
-except Exception as e:
-    error_msg = f"🚨 *PIPELINE FAILED!*\n*Error:* `{str(e)[:100]}`"
-    requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": error_msg, "parse_mode": "Markdown"})
+        tasks = [safe_process(session, i, scene) for i, scene in enumerate(scenes_data)]
+        results = await asyncio.gather(*tasks)
+        
+        results = sorted([r for r in results if r], key=lambda x: x['index'])
+
+        vid_list_path = os.path.join(TEMP_DIR, "vid_list.txt")
+        
+        with open(vid_list_path, "w") as f:
+            for r in results: f.write(f"file '{r['vid']}'\n")
+
+        raw_video = os.path.join(TEMP_DIR, 'raw_video.mp4')
+        final_video = 'final_video.mp4' 
+        
+        # ==========================================
+        # PHASE 2: AUDIO & VIDEO MUXING
+        # ==========================================
+        await run_ffmpeg_async(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', vid_list_path, '-c', 'copy', raw_video])
+
+        bgm_path = os.path.abspath("bgm.mp3")
+        if os.path.exists(bgm_path):
+            bgm_cmd = [
+                'ffmpeg', '-y', '-i', raw_video, '-stream_loop', '-1', '-i', bgm_path,
+                '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.38[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
+                '-map', '0:v', '-map', '[aout]',
+                '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', final_video
+            ]
+            await run_ffmpeg_async(bgm_cmd)
+        else:
+            shutil.move(raw_video, final_video)
+
+        # Cleanup
+        if os.path.exists(vid_list_path): os.remove(vid_list_path)
+        if os.path.exists(raw_video): os.remove(raw_video)
+        for r in results:
+            if os.path.exists(r['vid']): os.remove(r['vid'])
+            if os.path.exists(r['aud']): os.remove(r['aud'])
+
+        # ==========================================
+        # PHASE 3: GITHUB RELEASES UPLOAD
+        # ==========================================
+        video_link = None
+        print("\n🚀 Uploading Video directly to GitHub Releases...")
+        
+        run_id = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
+        tag_name = f"vid-{run_id}"
+        repo_name = os.environ.get('GITHUB_REPOSITORY', "shayarivibes46-a11y/AutoPilot-Tech-Hindi-Long")
+        
+        try:
+            cmd = ['gh', 'release', 'create', tag_name, final_video, '--repo', repo_name, '--notes', 'Automated Engineering Video Render']
+            
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            
+            if proc.returncode == 0:
+                video_link = f"https://github.com/{repo_name}/releases/download/{tag_name}/final_video.mp4"
+                print(f"✅ Success! Video uploaded to GitHub: {video_link}")
+            else:
+                err_msg = stderr.decode().strip()
+                print(f"❌ GitHub Release failed. Error: {err_msg}")
+        except Exception as e:
+            print(f"⚠️ Exception during GitHub upload: {str(e)}")
+
+        # ==========================================
+        # PHASE 4: TELEGRAM NOTIFICATION
+        # ==========================================
+        if telegram_token:
+            if video_link:
+                payload = {"chat_id": chat_id, "text": f"READY_TO_UPLOAD|{video_link}|{title.replace('|', '')}|{thumbnail_prompt.replace('|', '')}|{description.replace('|', '')}"}
+            else:
+                payload = {"chat_id": chat_id, "text": f"⚠️ ERROR: Upload fail hua. GitHub release banne mein problem aayi."}
+            
+            try:
+                async with session.post(f"https://api.telegram.org/bot{telegram_token}/sendMessage", json=payload) as resp:
+                    resp_text = await resp.text()
+                    print(f"\n--- TELEGRAM DEBUG ---")
+                    print(f"Status Code: {resp.status}")
+                    print(f"Response: {resp_text}")
+                    print(f"----------------------\n")
+            except Exception as e:
+                print(f"CRITICAL: Telegram API error - {str(e)}")
+        else:
+            print("CRITICAL WARNING: Telegram token missing. Cannot send notification.")
+
+if __name__ == "__main__":
+    if sys.platform.startswith('win'):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(main_pipeline())
