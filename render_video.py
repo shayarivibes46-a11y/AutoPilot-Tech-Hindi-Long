@@ -1,5 +1,5 @@
 import os, sys, requests, json, subprocess, re, gc, time, traceback
-import concurrent.futures
+import random
 
 # --- CONFIG & INPUT HANDLING ---
 raw_scenes = os.environ.get('SCENES_DATA')
@@ -29,22 +29,40 @@ MAIN_TOPIC = os.environ.get('VIDEO_TOPIC', scenes_data[0].get('b_roll_visual', '
 clean_words = [re.sub(r'[^A-Za-z0-9]', '', w) for w in MAIN_TOPIC.split()]
 topic_hash = "".join([w for w in clean_words if w][:3])
 
+# --- SMART DYNAMIC FALLBACK KEYWORDS ---
+# GitHub Actions (via n8n) se jo bhi fallback theme aayegi, yeh usey list mein badal dega.
+fallback_env = os.environ.get('FALLBACK_KEYWORDS', 'technology background, abstract engineering, circuit board, digital data, server room')
+FALLBACK_KEYWORDS = [kw.strip() for kw in fallback_env.split(',')]
+
 # --- FETCH ENGINE ---
 def fetch_multiple_pexels_videos(keyword, count=1):
-    search_terms = [keyword, topic_hash, "technology background"]
+    search_terms = [keyword] + FALLBACK_KEYWORDS
     videos_found = []
     for term in search_terms:
-        try:
-            url = f"https://api.pexels.com/videos/search?query={term}&per_page=10&orientation=landscape"
-            res = requests.get(url, headers={"Authorization": pexels_key}, timeout=20).json()
-            if 'videos' in res:
-                for vid in res['videos']:
-                    for file in vid['video_files']:
-                        if file['quality'] == 'hd' and file['width'] >= 1280:
-                            if file['link'] not in videos_found: videos_found.append(file['link'])
-                            break
-                    if len(videos_found) >= count: return videos_found
-        except Exception: continue
+        for attempt in range(2):
+            try:
+                time.sleep(random.uniform(0.1, 0.5))
+                # Jab attempts badhein toh safe page=1 rakho taaki khali result na aaye
+                random_page = random.randint(1, 2) if attempt == 0 else 1
+                url = f"https://api.pexels.com/videos/search?query={term}&per_page=15&page={random_page}&orientation=landscape"
+                
+                response = requests.get(url, headers={"Authorization": pexels_key}, timeout=20)
+                
+                # [IMPROVED]: Added Rate Limit (429) Handling
+                if response.status_code == 429:
+                    time.sleep(2)
+                    continue
+                
+                if response.status_code == 200:
+                    res = response.json()
+                    if 'videos' in res:
+                        for vid in res['videos']:
+                            for file in vid['video_files']:
+                                if file['quality'] == 'hd' and file['width'] >= 1280:
+                                    if file['link'] not in videos_found: videos_found.append(file['link'])
+                                    break
+                            if len(videos_found) >= count: return videos_found
+            except Exception: continue
     return videos_found
 
 # --- SCENE PROCESSING ---
@@ -72,12 +90,35 @@ def process_scene(i, scene):
         dur = float(subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]).decode().strip())
         
         # Download & Zoom
-        # FIX: 'keyword' ko 'b_roll_visual' mein badla gaya
-        urls = fetch_multiple_pexels_videos(scene.get('b_roll_visual', MAIN_TOPIC))
-        if not urls: raise Exception("No video found")
-        
+        is_valid_video = False
         raw_clip = f"raw_{i}.mp4"
-        with open(raw_clip, "wb") as f: f.write(requests.get(urls[0], timeout=30).content)
+        scene_keyword = scene.get('b_roll_visual', MAIN_TOPIC)
+        
+        for download_attempt in range(3):  # Download fail ho toh 3 baar retry karega
+            urls = fetch_multiple_pexels_videos(scene_keyword)
+            if not urls:
+                # Dynamic fallback word use kiya hai
+                urls = fetch_multiple_pexels_videos(random.choice(FALLBACK_KEYWORDS))
+                
+            if urls:
+                try:
+                    req = requests.get(urls[0], timeout=30)
+                    if req.status_code == 200:
+                        # [IMPROVED]: Increased size threshold to 200KB to strictly avoid corrupt/small files
+                        if len(req.content) > 200000:
+                            with open(raw_clip, "wb") as f: f.write(req.content)
+                            is_valid_video = True
+                            break # Download successful, break out of retry loop
+                        else:
+                            print(f"Video file too small ({len(req.content)} bytes) on attempt {download_attempt+1}, discarding.")
+                except Exception as e:
+                    print(f"Failed to download video for scene {i} on attempt {download_attempt+1}: {str(e)}")
+            
+            scene_keyword = random.choice(FALLBACK_KEYWORDS) # Reset kardo taaki next loop mein naya video fetch ho sake
+
+        if not is_valid_video:
+            raise Exception("Failed to download a valid video after 3 attempts.")
+        
         vf_string = "zoompan=z='min(max(zoom,pzoom)+0.001,1.1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=25"
         subprocess.run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', raw_clip, '-t', str(dur), '-vf', vf_string, '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
         
@@ -112,8 +153,8 @@ try:
     run_id = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
     tag_name = f"vid-{run_id}"
     
-    # Yahan "amu8085-lab/my-project1" ki jagah apne repo ka asali naam dal dena ya GitHub se environment variable ke through automatically fetch karne dena.
-    repo_name = os.environ.get('GITHUB_REPOSITORY', "amu8085-lab/my-project1") 
+    # Yahan Screenshot ke mutabik naya repo name set kiya gaya hai
+    repo_name = os.environ.get('GITHUB_REPOSITORY', "shayarivibes46-a11y/AutoPilot-Tech-Hindi-Long") 
     
     cmd = ['gh', 'release', 'create', tag_name, 'final_video.mp4', '--repo', repo_name, '--notes', 'Automated Video Render']
     
