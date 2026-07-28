@@ -108,9 +108,8 @@ async def process_scene(index, scene, session):
     raw_text = str(scene.get('text', '')).strip()
     search_query = scene.get('search_query', 'engineering technology')
     
-    # 1. Clean Text Input for TTS (हिंदी अक्षरों को बिना डैमेज किए साफ़ करना)
+    # 1. Clean Text Input for TTS
     text_line = raw_text.replace('&', ' और ').strip()
-    # UTF-8 Hindi Characters (\u0900-\u097F) और बेसिक पंक्चुएशन को सुरक्षित रखना
     text_line = re.sub(r'[^\w\s.,?!।\-\u0900-\u097F\u200d\u200c]', '', text_line)
     
     audio_file = f"audio_{scene_id}.mp3"
@@ -118,7 +117,6 @@ async def process_scene(index, scene, session):
     
     print(f"\n--- Scene {scene_id} ---")
     print(f"Clean Text for TTS: {text_line}")
-    print(f"Search Query: {search_query}")
     
     # 2. TTS ऑडियो जनरेट करें
     tts_success = await generate_tts(text_line, audio_file)
@@ -129,8 +127,6 @@ async def process_scene(index, scene, session):
     # 3. Pexels से वीडियो लाएं
     v_success = await fetch_pexels_video(session, search_query, video_file)
     if not v_success:
-        print(f"Scene {scene_id}: Stock video प्राप्त नहीं हुआ, डिफ़ॉल्ट/कलर बैकग्राउंड का उपयोग किया जाएगा।")
-        # यदि स्टॉक वीडियो न मिले तो FFMPEG से ब्लैंक कलर वीडियो बनाना
         cmd_blank = [
             'ffmpeg', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30',
             '-t', '5', '-pix_fmt', 'yuv420p', video_file
@@ -144,6 +140,36 @@ async def process_scene(index, scene, session):
         'text': text_line
     }
 
+# --- TELEGRAM UPLOAD FUNCTION (NEWLY ADDED) ---
+async def send_to_telegram(video_path):
+    """तैयार वीडियो को Telegram चैनल/यूज़र को भेजता है"""
+    if not telegram_token or not chat_id:
+        print("❌ Telegram credentials missing, skipping upload.")
+        return False
+        
+    print(f"🚀 Uploading {video_path} to Telegram...")
+    url = f"https://api.telegram.org/bot{telegram_token}/sendVideo"
+    
+    try:
+        with open(video_path, 'rb') as f:
+            form = aiohttp.FormData()
+            form.add_field('chat_id', chat_id)
+            form.add_field('caption', f"*{title}*\n\n{description}\n\nJoin: {channel_name}")
+            form.add_field('video', f, filename=video_path, content_type='video/mp4')
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=form) as response:
+                    if response.status == 200:
+                        print("✅ Video successfully sent to Telegram!")
+                        return True
+                    else:
+                        resp_text = await response.text()
+                        print(f"❌ Telegram upload failed: {resp_text}")
+                        return False
+    except Exception as e:
+        print(f"❌ Error uploading to Telegram: {e}")
+        return False
+
 # --- MAIN ASYNC EXECUTION ENGINE ---
 async def main():
     if not scenes_data:
@@ -156,6 +182,27 @@ async def main():
         
     valid_scenes = [r for r in results if r is not None]
     print(f"\nDEBUG: Successfully processed {len(valid_scenes)}/{len(scenes_data)} scenes.")
+    
+    if valid_scenes:
+        # --- FFmpeg Concat Process ---
+        print("🎬 Merging all scenes into final video...")
+        concat_file = "concat_list.txt"
+        final_video = "final_output.mp4"
+        
+        with open(concat_file, "w", encoding="utf-8") as f:
+            for scene in valid_scenes:
+                f.write(f"file '{scene['video']}'\n")
+        
+        # Merge videos
+        subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', concat_file, '-c', 'copy', final_video], 
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        if os.path.exists(final_video):
+            print(f"✅ Final video created: {final_video}")
+            # यहाँ Telegram पर भेजने का फ़ंक्शन कॉल हो रहा है
+            await send_to_telegram(final_video)
+        else:
+            print("❌ Final video merge failed.")
 
 if __name__ == "__main__":
     asyncio.run(main())
