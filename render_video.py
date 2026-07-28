@@ -13,7 +13,7 @@ chat_id = os.environ.get('CHAT_ID')
 telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
 
 # 👇 Yahan apna channel name set karein 👇
-channel_name = "Deep Space®" 
+channel_name = "Decode Engineering" 
 
 print(f"DEBUG: Processing {len(scenes_data)} scenes async...")
 
@@ -221,7 +221,7 @@ async def main_pipeline():
         
         run_id = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
         tag_name = f"vid-{run_id}"
-        repo_name = "amu8085-lab/my-project1" 
+        repo_name = "shayarivibes46-a11y/AutoPilot-Tech-Hindi-Long" 
         
         try:
             cmd = ['gh', 'release', 'create', tag_name, final_video, '--repo', repo_name, '--notes', 'Automated Video Render']
