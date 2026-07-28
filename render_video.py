@@ -17,8 +17,8 @@ pexels_key = os.environ.get('PEXELS_API_KEY')
 chat_id = os.environ.get('CHAT_ID')
 telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
 
-# Concurrency limiter to prevent "No space left on device" error
-MAX_CONCURRENT_SCENES = 3 
+# Concurrency limiter: Changed to 2 to prevent GitHub Actions CPU Overload & "No space left" error
+MAX_CONCURRENT_SCENES = 2 
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCENES)
 
 def load_scenes_data():
@@ -37,6 +37,16 @@ def load_scenes_data():
         return json.loads(os.environ.get('SCENES_DATA', '[]'))
     except:
         return []
+
+def get_audio_duration(file_path):
+    """Helper function to get precise audio duration to prevent FFmpeg loop hangs."""
+    try:
+        cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        return float(result.stdout.strip())
+    except Exception as e:
+        print(f"Error getting audio duration: {e}")
+        return 5.0 # Fallback 5 seconds
 
 async def generate_tts(text, output_path, voice="hi-IN-MadhurNeural"):
     try:
@@ -65,13 +75,13 @@ async def fetch_pexels_video(session, query, output_path):
                         async with session.get(link) as vid_resp:
                             with open(output_path, 'wb') as f:
                                 f.write(await vid_resp.read())
-                            return True
+                        return True
     except Exception as e:
         print(f"Pexels fetch failed: {e}")
     return False
 
 async def process_scene(index, scene, session):
-    async with semaphore: # Limit parallel execution to save disk space
+    async with semaphore: # Limit parallel execution to save disk space & CPU
         scene_id = index + 1
         raw_text = str(scene.get('text', '')).strip()
         search_query = scene.get('search_query', scene.get('keyword', 'technology'))
@@ -91,18 +101,26 @@ async def process_scene(index, scene, session):
         if not await fetch_pexels_video(session, search_query, video_file):
             subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30', '-t', '10', video_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-        # 3. Merge Audio and Video (Forcing re-encode to prevent file size bloat)
+        # 3. Merge Audio and Video
         print(f"Merging Video and Audio for Scene {scene_id}...")
+        
+        # Calculate accurate duration to prevent FFmpeg infinite loops
+        audio_duration = get_audio_duration(audio_file)
+        
         cmd_merge = [
             'ffmpeg', '-y', 
             '-stream_loop', '-1', 
             '-i', video_file, 
             '-i', audio_file, 
-            '-c:v', 'libx264',        # Changed from 'copy'
-            '-preset', 'ultrafast',   # Added for speed
-            '-crf', '28',             # Added for consistent compression
+            '-t', str(audio_duration),        # Using precise duration instead of -shortest
+            '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30', # Scale fix to prevent concat issues
+            '-c:v', 'libx264',                # Re-encoding to match formats
+            '-preset', 'ultrafast',           # Added for speed
+            '-crf', '28',                     # Added for consistent compression
+            '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', 
-            '-shortest', 
+            '-ar', '44100',
+            '-ac', '2',
             '-map', '0:v:0', 
             '-map', '1:a:0', 
             merged_video
@@ -178,6 +196,7 @@ async def main():
             # Clean up intermediate merged files to free up space
             for scene in valid_scenes:
                 if os.path.exists(scene['video']): os.remove(scene['video'])
+            if os.path.exists(concat_file): os.remove(concat_file)
                 
             print("🚀 Uploading final video and triggering n8n...")
             video_url = await upload_to_github_release(final_video)
