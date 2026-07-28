@@ -13,7 +13,7 @@ chat_id = os.environ.get('CHAT_ID')
 telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
 
 # 👇 Yahan Decode Engineering channel name set kiya gaya hai 👇
-channel_name = "Decode Engineering" 
+channel_name = "Decode®" 
 
 print(f"DEBUG: Processing {len(scenes_data)} scenes async...")
 
