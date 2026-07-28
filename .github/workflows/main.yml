@@ -2,7 +2,7 @@ name: Render Video Pipeline
 
 on:
   repository_dispatch:
-    types: [render_video]
+    types: [render_and_upload]
   workflow_dispatch:
     inputs:
       title:
@@ -17,6 +17,11 @@ on:
         description: 'Thumbnail Prompt'
         required: false
         default: 'Cinematic engineering thumbnail'
+
+# GITHUB_TOKEN को फाइल्स और एक्शन्स डिलीट करने की परमिशन देना जरूरी है
+permissions:
+  actions: write
+  contents: write
 
 jobs:
   render:
@@ -49,9 +54,42 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID || github.event.client_payload.chat_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
-          # Optional Metadata Variables (इन्हें safe UTF-8 रखा गया है)
+          # Optional Metadata Variables
           TITLE: ${{ github.event.client_payload.title || inputs.title }}
           DESCRIPTION: ${{ github.event.client_payload.description || inputs.description }}
           THUMBNAIL_PROMPT: ${{ github.event.client_payload.thumbnail_prompt || inputs.thumbnail_prompt }}
         run: |
           python render_video.py
+
+      - name: 🧹 Auto-Delete Old .mp4 Videos from Repository (Keep Last 2)
+        run: |
+          # यह कोड रिपॉजिटरी में मौजूद पुरानी वीडियो को डिलीट करेगा
+          shopt -s nullglob
+          videos=( $(ls -t *.mp4 2>/dev/null) )
+          
+          if [ ${#videos[@]} -gt 2 ]; then
+            echo "Found ${#videos[@]} videos. Keeping latest 2 and deleting the rest..."
+            
+            # 2 लेटेस्ट छोड़कर बाकी सब डिलीट करें
+            for file in "${videos[@]:2}"; do
+              rm -f "$file"
+            done
+            
+            # Github पर अपडेट (Push) करें
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git add -u
+            git commit -m "Auto-cleanup: Deleted old videos, keeping latest 2" || true
+            git push || true
+          else
+            echo "2 or fewer videos found in repository. No cleanup needed."
+          fi
+        continue-on-error: true
+
+      - name: 🗑️ Auto-Delete Old Workflow Runs (Keep Last 2)
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          retain_days: 0           # 0 दिन (तुरंत डिलीट करे)
+          keep_minimum_runs: 2     # सिर्फ 2 लेटेस्ट रन (history) बचा कर रखे
