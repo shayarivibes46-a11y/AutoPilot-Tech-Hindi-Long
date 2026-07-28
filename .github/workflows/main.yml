@@ -98,11 +98,3 @@ jobs:
             echo "2 or fewer videos found in repository. No cleanup needed."
           fi
         continue-on-error: true
-
-      - name: 🗑️ Auto-Delete Old Workflow Runs (Keep Last 2)
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          retain_days: 0           # 0 दिन (तुरंत डिलीट करे)
-          keep_minimum_runs: 2     # सिर्फ 2 लेटेस्ट रन (history) बचा कर रखे
