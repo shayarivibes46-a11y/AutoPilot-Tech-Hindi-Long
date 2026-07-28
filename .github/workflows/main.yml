@@ -1,59 +1,63 @@
-name: Auto Render Engineering Video
+name: Decode Engineering Video Renderer
 
 on:
-  repository_dispatch:
-    types: [render_and_upload]
+  workflow_dispatch:
+    inputs:
+      scenes_data:
+        description: 'JSON array of scenes data'
+        required: true
+        type: string
+      title:
+        description: 'Video Title'
+        required: true
+        type: string
+      description:
+        description: 'Video Description'
+        required: true
+        type: string
+      thumbnail_prompt:
+        description: 'Prompt for Thumbnail Generation'
+        required: true
+        type: string
 
-# 👇 YEH BLOCK ADD KIYA GAYA HAI (Releases create karne ki permission) 👇
+# GitHub Releases create करने के लिए यह permission अनिवार्य है
 permissions:
   contents: write
 
 jobs:
-  build_video:
+  build-and-render:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Install System Dependencies
+      - name: 🎬 Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Install Python Dependencies
+      - name: 📦 Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          # Pillow 9.5.0 zaroori hai (ANTIALIAS error fix)
-          pip install moviepy==1.0.3 requests edge-tts urllib3 Pillow==9.5.0
+          pip install aiohttp edge-tts
 
-      - name: Run Video Rendering Script
+      - name: 🚀 Run Async Video Render Pipeline
         env:
-          SCENES_DATA: ${{ github.event.client_payload.scenes_data }}
-          CHAT_ID: ${{ github.event.client_payload.chat_id }}
-          TITLE: ${{ github.event.client_payload.title }}
-          DESCRIPTION: ${{ github.event.client_payload.description }}
-          THUMBNAIL_PROMPT: ${{ github.event.client_payload.thumbnail_prompt }}
-          
-          # 👇 YAHAN SMART FALLBACK KEYWORDS ADD KIYA GAYA HAI 👇
-          FALLBACK_KEYWORDS: ${{ github.event.client_payload.fallback_keywords }}
-          
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }} 
-          # 👇 YEH LINE ADD KI GAYI HAI 👇
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python render_video.py
-
-      # 👇 NAYA AUTO-DELETE BLOCK YAHAN HAI 👇
-      - name: Auto-delete older releases
-        uses: dev-drprasad/delete-older-releases@v0.3.3
-        with:
-          keep_latest: 3
-          delete_tags: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCENES_DATA: ${{ inputs.scenes_data }}
+          TITLE: ${{ inputs.title }}
+          DESCRIPTION: ${{ inputs.description }}
+          THUMBNAIL_PROMPT: ${{ inputs.thumbnail_prompt }}
+          # Secrets (GitHub Repository Secrets में सेट होने चाहिए)
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          # gh cli को authenticate करने के लिए GitHub Token
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+        run: |
+          python render_video.py
