@@ -31,7 +31,6 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
 
-      # --- ADDED THIS NEW STEP TO FREE UP DISK SPACE ---
       - name: 🧹 Maximize Build Space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -42,7 +41,6 @@ jobs:
           large-packages: true
           docker-images: true
           swap-storage: true
-      # -------------------------------------------------
 
       - name: 🐍 Set up Python
         uses: actions/setup-python@v5
@@ -74,27 +72,40 @@ jobs:
         run: |
           python render_video.py
 
-      - name: 🧹 Auto-Delete Old .mp4 Videos from Repository (Keep Last 2)
+      - name: 🧹 Auto-Delete Old Releases & Videos (Keep Only Latest 1)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # यह कोड रिपॉजिटरी में मौजूद पुरानी वीडियो को डिलीट करेगा
+          # 1. यह कोड पुरानी GitHub Releases और उनके Tags को डिलीट करेगा, सिर्फ सबसे नई (1) छोड़कर
+          releases=$(gh release list --limit 100 | awk '{print $1}')
+          count=$(echo "$releases" | wc -w)
+          
+          if [ "$count" -gt 1 ]; then
+            echo "Found $count releases. Keeping the latest 1 and deleting the rest..."
+            old_releases=$(echo "$releases" | tail -n +2)
+            for release in $old_releases; do
+              echo "Deleting release and tag: $release"
+              gh release delete "$release" --cleanup-tag -y || true
+            done
+          else
+            echo "1 or fewer releases found. No release cleanup needed."
+          fi
+
+          # 2. यह कोड रिपॉजिटरी में मौजूद पुरानी वीडियो को डिलीट करेगा, सिर्फ 1 छोड़कर
           shopt -s nullglob
           videos=( $(ls -t *.mp4 2>/dev/null) )
           
-          if [ ${#videos[@]} -gt 2 ]; then
-            echo "Found ${#videos[@]} videos. Keeping latest 2 and deleting the rest..."
-            
-            # 2 लेटेस्ट छोड़कर बाकी सब डिलीट करें
-            for file in "${videos[@]:2}"; do
+          if [ ${#videos[@]} -gt 1 ]; then
+            echo "Found ${#videos[@]} videos. Keeping latest 1 and deleting the rest..."
+            for file in "${videos[@]:1}"; do
               rm -f "$file"
             done
-            
-            # Github पर अपडेट (Push) करें
             git config --global user.name "github-actions[bot]"
             git config --global user.email "github-actions[bot]@users.noreply.github.com"
             git add -u
-            git commit -m "Auto-cleanup: Deleted old videos, keeping latest 2" || true
+            git commit -m "Auto-cleanup: Deleted old videos, keeping latest 1" || true
             git push || true
           else
-            echo "2 or fewer videos found in repository. No cleanup needed."
+            echo "1 or fewer videos found in repository. No cleanup needed."
           fi
         continue-on-error: true
