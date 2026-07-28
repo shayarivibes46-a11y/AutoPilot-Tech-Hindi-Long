@@ -91,14 +91,16 @@ async def process_scene(index, scene, session):
         if not await fetch_pexels_video(session, search_query, video_file):
             subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30', '-t', '10', video_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
-        # 3. Merge Audio and Video (Looping video to match audio length)
+        # 3. Merge Audio and Video (Forcing re-encode to prevent file size bloat)
         print(f"Merging Video and Audio for Scene {scene_id}...")
         cmd_merge = [
             'ffmpeg', '-y', 
             '-stream_loop', '-1', 
             '-i', video_file, 
             '-i', audio_file, 
-            '-c:v', 'copy', 
+            '-c:v', 'libx264',        # Changed from 'copy'
+            '-preset', 'ultrafast',   # Added for speed
+            '-crf', '28',             # Added for consistent compression
             '-c:a', 'aac', 
             '-shortest', 
             '-map', '0:v:0', 
