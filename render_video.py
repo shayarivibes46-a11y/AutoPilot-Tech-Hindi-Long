@@ -59,7 +59,8 @@ async def generate_tts(text, output_path, voice="hi-IN-MadhurNeural"):
 
 async def fetch_pexels_video(session, query, output_path):
     if not pexels_key: return False
-    url = f"https://api.pexels.com/videos/search?query={query}&per_page=3&orientation=portrait"
+    # Changed orientation to landscape for 16:9
+    url = f"https://api.pexels.com/videos/search?query={query}&per_page=3&orientation=landscape"
     try:
         async with session.get(url, headers={"Authorization": pexels_key}) as resp:
             if resp.status == 200:
@@ -99,7 +100,8 @@ async def process_scene(index, scene, session):
             
         # 2. Fetch Video
         if not await fetch_pexels_video(session, search_query, video_file):
-            subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30', '-t', '10', video_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Changed resolution to 1920x1080 for 16:9
+            subprocess.run(['ffmpeg', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1920x1080:r=30', '-t', '10', video_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
         # 3. Merge Audio and Video
         print(f"Merging Video and Audio for Scene {scene_id}...")
@@ -113,7 +115,8 @@ async def process_scene(index, scene, session):
             '-i', video_file, 
             '-i', audio_file, 
             '-t', str(audio_duration),        # Using precise duration instead of -shortest
-            '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30', # Scale fix to prevent concat issues
+            # Changed scale and crop parameters to 1920:1080 for 16:9
+            '-vf', 'scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30', 
             '-c:v', 'libx264',                # Re-encoding to match formats
             '-preset', 'ultrafast',           # Added for speed
             '-crf', '28',                     # Added for consistent compression
