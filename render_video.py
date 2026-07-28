@@ -44,9 +44,11 @@ def load_scenes_data():
 # --- LOAD ALL CONFIGURATIONS & DATA ---
 scenes_data = load_scenes_data()
 
-title = os.environ.get('TITLE', 'Engineering Video')
-description = os.environ.get('DESCRIPTION', 'Educational video')
-thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic engineering thumbnail')
+# n8n स्प्लिटर ('|') को ब्रेक न करने के लिए पाइप कैरेक्टर को हटा रहे हैं
+title = str(os.environ.get('TITLE', 'Engineering Video')).replace('|', '-')
+description = str(os.environ.get('DESCRIPTION', 'Educational video')).replace('|', '-')
+thumbnail_prompt = str(os.environ.get('THUMBNAIL_PROMPT', 'Cinematic engineering thumbnail')).replace('|', '-')
+
 pexels_key = os.environ.get('PEXELS_API_KEY')
 chat_id = os.environ.get('CHAT_ID')
 telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -82,7 +84,7 @@ async def fetch_pexels_video(session, query, output_path):
                 data = await resp.json()
                 videos = data.get('videos', [])
                 if videos:
-                    # सबसे अच्छी क्वालिट की HD वीडियो चुनना
+                    # सबसे अच्छी क्वालिटी की HD वीडियो चुनना
                     video_files = videos[0].get('video_files', [])
                     selected_file = None
                     for vf in video_files:
@@ -102,11 +104,11 @@ async def fetch_pexels_video(session, query, output_path):
         print(f"Pexels fetch failed for query '{query}': {e}")
     return False
 
-# --- SCENE PROCESSING LAYER ---
+# --- SCENE PROCESSING LAYER (WITH AUDIO MERGE FIX) ---
 async def process_scene(index, scene, session):
     scene_id = index + 1
     raw_text = str(scene.get('text', '')).strip()
-    search_query = scene.get('search_query', 'engineering technology')
+    search_query = scene.get('search_query', scene.get('keyword', 'engineering technology'))
     
     # 1. Clean Text Input for TTS
     text_line = raw_text.replace('&', ' और ').strip()
@@ -114,6 +116,7 @@ async def process_scene(index, scene, session):
     
     audio_file = f"audio_{scene_id}.mp3"
     video_file = f"video_{scene_id}.mp4"
+    merged_video = f"merged_{scene_id}.mp4"
     
     print(f"\n--- Scene {scene_id} ---")
     print(f"Clean Text for TTS: {text_line}")
@@ -129,45 +132,119 @@ async def process_scene(index, scene, session):
     if not v_success:
         cmd_blank = [
             'ffmpeg', '-y', '-f', 'lavfi', '-i', 'color=c=black:s=1080x1920:r=30',
-            '-t', '5', '-pix_fmt', 'yuv420p', video_file
+            '-t', '15', '-pix_fmt', 'yuv420p', video_file
         ]
         subprocess.run(cmd_blank, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+    # 4. Audio और Video को आपस में मर्ज करें (Video को Audio की लम्बाई तक लूप करें)
+    print(f"Merging Video and Audio for Scene {scene_id}...")
+    cmd_merge = [
+        'ffmpeg', '-y', 
+        '-stream_loop', '-1',  # वीडियो को लूप में चलाएगा
+        '-i', video_file, 
+        '-i', audio_file, 
+        '-c:v', 'copy', 
+        '-c:a', 'aac', 
+        '-shortest',           # जब ऑडियो ख़त्म हो जाए, तब रुक जाएगा
+        '-map', '0:v:0', 
+        '-map', '1:a:0', 
+        merged_video
+    ]
+    subprocess.run(cmd_merge, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
     return {
         'id': scene_id,
         'audio': audio_file,
-        'video': video_file,
+        'video': merged_video,  # यहाँ मर्ज किया गया वीडियो रिटर्न कर रहे हैं
         'text': text_line
     }
 
-# --- TELEGRAM UPLOAD FUNCTION (NEWLY ADDED) ---
-async def send_to_telegram(video_path):
-    """तैयार वीडियो को Telegram चैनल/यूज़र को भेजता है"""
+# --- GITHUB RELEASE UPLOAD FUNCTION ---
+async def upload_to_github_release(file_path):
+    """तैयार वीडियो को GitHub Release में अपलोड करता है और URL रिटर्न करता है"""
+    gh_token = os.environ.get('GH_TOKEN')
+    repo = os.environ.get('GITHUB_REPOSITORY')
+    
+    if not gh_token or not repo:
+        print("❌ GH_TOKEN या GITHUB_REPOSITORY नहीं मिला, GitHub Release स्किप कर रहे हैं।")
+        return None
+        
+    tag_name = f"vid-{int(time.time())}"
+    print(f"📦 Creating GitHub Release '{tag_name}' for {repo}...")
+    
+    create_url = f"https://api.github.com/repos/{repo}/releases"
+    headers = {
+        "Authorization": f"Bearer {gh_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    
+    data = {
+        "tag_name": tag_name,
+        "name": f"Automated Release {tag_name}",
+        "draft": False,
+        "prerelease": False
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        # 1. Create Release
+        async with session.post(create_url, headers=headers, json=data) as resp:
+            if resp.status not in [201, 200]:
+                print(f"❌ Release बनाने में विफलता: {await resp.text()}")
+                return None
+                
+            release_data = await resp.json()
+            upload_url_raw = release_data.get('upload_url', '')
+            upload_url = upload_url_raw.split('{')[0] + f"?name={os.path.basename(file_path)}"
+            
+        # 2. Upload Asset (MP4 File)
+        print("⬆️ Uploading MP4 file to GitHub Release... (इसमें कुछ समय लग सकता है)")
+        upload_headers = headers.copy()
+        upload_headers['Content-Type'] = 'video/mp4'
+        
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
+            
+        async with session.post(upload_url, headers=upload_headers, data=file_data) as asset_resp:
+            if asset_resp.status not in [201, 200]:
+                print(f"❌ Asset अपलोड में विफलता: {await asset_resp.text()}")
+                return None
+                
+            asset_data = await asset_resp.json()
+            download_url = asset_data.get('browser_download_url')
+            print(f"✅ Video Uploaded! URL: {download_url}")
+            return download_url
+
+# --- TELEGRAM MESSAGE ALERT (FIXED FOR n8n ROUTER) ---
+async def send_to_telegram(video_url):
+    """n8n को ट्रिगर करने के लिए Telegram पर READY_TO_UPLOAD टेक्स्ट मैसेज भेजता है"""
     if not telegram_token or not chat_id:
         print("❌ Telegram credentials missing, skipping upload.")
         return False
         
-    print(f"🚀 Uploading {video_path} to Telegram...")
-    url = f"https://api.telegram.org/bot{telegram_token}/sendVideo"
+    print("🚀 Sending Webhook Trigger Message to Telegram...")
+    url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+    
+    # n8n वर्कफ़्लो के अनुसार फॉर्मेट: READY_TO_UPLOAD|URL|Title|Thumbnail|Description
+    message_text = f"READY_TO_UPLOAD|{video_url}|{title}|{thumbnail_prompt}|{description}"
+    
+    payload = {
+        "chat_id": chat_id,
+        "text": message_text
+    }
     
     try:
-        with open(video_path, 'rb') as f:
-            form = aiohttp.FormData()
-            form.add_field('chat_id', chat_id)
-            form.add_field('caption', f"*{title}*\n\n{description}\n\nJoin: {channel_name}")
-            form.add_field('video', f, filename=video_path, content_type='video/mp4')
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=form) as response:
-                    if response.status == 200:
-                        print("✅ Video successfully sent to Telegram!")
-                        return True
-                    else:
-                        resp_text = await response.text()
-                        print(f"❌ Telegram upload failed: {resp_text}")
-                        return False
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status == 200:
+                    print("✅ Text trigger successfully sent to Telegram!")
+                    return True
+                else:
+                    resp_text = await response.text()
+                    print(f"❌ Telegram message failed: {resp_text}")
+                    return False
     except Exception as e:
-        print(f"❌ Error uploading to Telegram: {e}")
+        print(f"❌ Error sending message to Telegram: {e}")
         return False
 
 # --- MAIN ASYNC EXECUTION ENGINE ---
@@ -199,8 +276,15 @@ async def main():
         
         if os.path.exists(final_video):
             print(f"✅ Final video created: {final_video}")
-            # यहाँ Telegram पर भेजने का फ़ंक्शन कॉल हो रहा है
-            await send_to_telegram(final_video)
+            
+            # 1. वीडियो को GitHub Releases पर अपलोड करें
+            video_url = await upload_to_github_release(final_video)
+            
+            # 2. अगर अपलोड सफल रहा, तो Telegram पर n8n के लिए मैसेज भेजें
+            if video_url:
+                await send_to_telegram(video_url)
+            else:
+                print("❌ Failed to get video URL, cannot send Telegram trigger.")
         else:
             print("❌ Final video merge failed.")
 
