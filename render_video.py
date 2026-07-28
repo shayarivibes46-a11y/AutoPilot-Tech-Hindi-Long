@@ -3,11 +3,36 @@ import aiohttp
 import edge_tts
 import shutil
 
-# --- VARIABLES ---
-scenes_data = json.loads(os.environ.get('SCENES_DATA', '[]'))
-title = os.environ.get('TITLE', 'Engineering Video')
-description = os.environ.get('DESCRIPTION', 'Educational video')
-thumbnail_prompt = os.environ.get('THUMBNAIL_PROMPT', 'Cinematic engineering thumbnail')
+# --- VARIABLES & SAFE UTF-8 DECODING LAYER ---
+def _safe_decode(val, default=""):
+    if not val:
+        return default
+    if isinstance(val, bytes):
+        try:
+            return val.decode('utf-8')
+        except:
+            return val.decode('latin-1', errors='ignore')
+    if isinstance(val, str):
+        try:
+            # Fix potential double-encoded or mis-interpreted utf-8 characters via latin-1 bytes fallback
+            return val.encode('latin-1').decode('utf-8')
+        except:
+            return val
+    return str(val)
+
+# Load raw environment variables safely without altering any structure
+scenes_env = os.environ.get('SCENES_DATA', '[]')
+if isinstance(scenes_env, str):
+    try:
+        scenes_data = json.loads(_safe_decode(scenes_env))
+    except:
+        scenes_data = []
+else:
+        scenes_data = []
+
+title = _safe_decode(os.environ.get('TITLE', 'Engineering Video'))
+description = _safe_decode(os.environ.get('DESCRIPTION', 'Educational video'))
+thumbnail_prompt = _safe_decode(os.environ.get('THUMBNAIL_PROMPT', 'Cinematic engineering thumbnail'))
 pexels_key = os.environ.get('PEXELS_API_KEY')
 chat_id = os.environ.get('CHAT_ID')
 telegram_token = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -65,7 +90,8 @@ async def process_scene(session, i, scene):
     keyword = scene.get('keyword') or scene.get('b_roll_visual') or 'engineering'
     
     # Clean Hindi text for TTS engine
-    text_line = scene.get('text', '').replace('&', ' और ').strip()
+    raw_text_input = scene.get('text', '')
+    text_line = _safe_decode(raw_text_input).replace('&', ' और ').strip()
     text_line = re.sub(r'[^\w\s.,?!।\-\u200d\u200c]', '', text_line)
     
     if not text_line: return None
