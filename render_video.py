@@ -71,9 +71,12 @@ def process_scene(i, scene):
         audio_path, scene_filename = f"audio_{i}.wav", f"scene_{i}.mp4"
         
         # TTS
-        text_clean = re.sub(r'[^\w\s.,?!-]', '', scene.get('text', '').replace('&', ' aur ')).strip()
+        # [FIXED]: Added Purna Viram (।) to regex so Hindi pauses are respected and words don't merge
+        text_clean = re.sub(r'[^\w\s.,?!।-]', '', scene.get('text', '').replace('&', ' aur ')).strip()
         with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_clean)
-        subprocess.run(['python', '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+10%', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
+        
+        # [FIXED]: Reduced rate to +5% to prevent vowel clipping and maintain a natural Hindi flow
+        subprocess.run(['python', '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+5%', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
         
         # FIX: Added normalize=0 to amix so TTS volume doesn't fluctuate when SFX plays
         audio_filter = "[1:a]volume=0.3[w];[2:a]volume=0.3,adelay=500|500[p];[0:a][w][p]amix=inputs=3:duration=first:normalize=0[aout];[aout]volume=1.2[final_aout]"
