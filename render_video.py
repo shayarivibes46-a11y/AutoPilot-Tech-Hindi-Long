@@ -24,13 +24,11 @@ except json.JSONDecodeError as e:
     raise e
 
 # --- TOPIC & HASHTAG SETUP ---
-# FIX: 'keyword' ko 'b_roll_visual' mein badla gaya
 MAIN_TOPIC = os.environ.get('VIDEO_TOPIC', scenes_data[0].get('b_roll_visual', 'Engineering')).strip().title()
 clean_words = [re.sub(r'[^A-Za-z0-9]', '', w) for w in MAIN_TOPIC.split()]
 topic_hash = "".join([w for w in clean_words if w][:3])
 
 # --- SMART DYNAMIC FALLBACK KEYWORDS ---
-# GitHub Actions (via n8n) se jo bhi fallback theme aayegi, yeh usey list mein badal dega.
 fallback_env = os.environ.get('FALLBACK_KEYWORDS', 'technology background, abstract engineering, circuit board, digital data, server room')
 FALLBACK_KEYWORDS = [kw.strip() for kw in fallback_env.split(',')]
 
@@ -42,13 +40,11 @@ def fetch_multiple_pexels_videos(keyword, count=1):
         for attempt in range(2):
             try:
                 time.sleep(random.uniform(0.1, 0.5))
-                # Jab attempts badhein toh safe page=1 rakho taaki khali result na aaye
                 random_page = random.randint(1, 2) if attempt == 0 else 1
                 url = f"https://api.pexels.com/videos/search?query={term}&per_page=15&page={random_page}&orientation=landscape"
                 
                 response = requests.get(url, headers={"Authorization": pexels_key}, timeout=20)
                 
-                # [IMPROVED]: Added Rate Limit (429) Handling
                 if response.status_code == 429:
                     time.sleep(2)
                     continue
@@ -70,16 +66,18 @@ def process_scene(i, scene):
     try:
         audio_path, scene_filename = f"audio_{i}.wav", f"scene_{i}.mp4"
         
-        # TTS
-        # [FIXED]: Added Purna Viram (।) to regex so Hindi pauses are respected and words don't merge
-        text_clean = re.sub(r'[^\w\s.,?!।-]', '', scene.get('text', '').replace('&', ' aur ')).strip()
+        # --- TTS FIXES APPLIED HERE ---
+        # 1. Added \u200d and \u200c to preserve Devnagari conjuncts (half-letters)
+        # 2. Added Hindi Purna Viram (।) for natural pauses
+        # 3. Changed '&' replacement from ' aur ' to Devanagari ' और '
+        text_clean = re.sub(r'[^\w\s.,?!।\-\u200d\u200c]', '', scene.get('text', '').replace('&', ' और ')).strip()
         with open(f"temp_{i}.txt", "w", encoding="utf-8") as f: f.write(text_clean)
         
-        # [FIXED]: Reduced rate to +5% to prevent vowel clipping and maintain a natural Hindi flow
-        subprocess.run(['python', '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '--rate=+5%', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
+        # 4. Removed artificial speed boost (--rate=+10%) to allow 100% natural, clear pronunciation
+        subprocess.run(['python', '-m', 'edge_tts', '--voice', 'hi-IN-MadhurNeural', '-f', f"temp_{i}.txt", '--write-media', f"raw_{i}.mp3"], check=True)
         
-        # FIX: Added normalize=0 to amix so TTS volume doesn't fluctuate when SFX plays
-        audio_filter = "[1:a]volume=0.3[w];[2:a]volume=0.3,adelay=500|500[p];[0:a][w][p]amix=inputs=3:duration=first:normalize=0[aout];[aout]volume=1.2[final_aout]"
+        # 5. Adjusted volume=1.0 to eliminate digital clipping distortion
+        audio_filter = "[1:a]volume=0.3[w];[2:a]volume=0.3,adelay=500|500[p];[0:a][w][p]amix=inputs=3:duration=first:normalize=0[aout];[aout]volume=1.0[final_aout]"
         subprocess.run([
             'ffmpeg', '-y', 
             '-i', f"raw_{i}.mp3", 
@@ -97,27 +95,25 @@ def process_scene(i, scene):
         raw_clip = f"raw_{i}.mp4"
         scene_keyword = scene.get('b_roll_visual', MAIN_TOPIC)
         
-        for download_attempt in range(3):  # Download fail ho toh 3 baar retry karega
+        for download_attempt in range(3):
             urls = fetch_multiple_pexels_videos(scene_keyword)
             if not urls:
-                # Dynamic fallback word use kiya hai
                 urls = fetch_multiple_pexels_videos(random.choice(FALLBACK_KEYWORDS))
                 
             if urls:
                 try:
                     req = requests.get(urls[0], timeout=30)
                     if req.status_code == 200:
-                        # [IMPROVED]: Increased size threshold to 200KB to strictly avoid corrupt/small files
                         if len(req.content) > 200000:
                             with open(raw_clip, "wb") as f: f.write(req.content)
                             is_valid_video = True
-                            break # Download successful, break out of retry loop
+                            break
                         else:
                             print(f"Video file too small ({len(req.content)} bytes) on attempt {download_attempt+1}, discarding.")
                 except Exception as e:
                     print(f"Failed to download video for scene {i} on attempt {download_attempt+1}: {str(e)}")
             
-            scene_keyword = random.choice(FALLBACK_KEYWORDS) # Reset kardo taaki next loop mein naya video fetch ho sake
+            scene_keyword = random.choice(FALLBACK_KEYWORDS)
 
         if not is_valid_video:
             raise Exception("Failed to download a valid video after 3 attempts.")
@@ -125,7 +121,6 @@ def process_scene(i, scene):
         vf_string = "zoompan=z='min(max(zoom,pzoom)+0.001,1.1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1280x720:fps=25"
         subprocess.run(['ffmpeg', '-y', '-stream_loop', '-1', '-i', raw_clip, '-t', str(dur), '-vf', vf_string, '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-an', scene_filename], check=True)
         
-        # FIX: 'keyword' ko 'b_roll_visual' mein badla gaya
         return {"vid": scene_filename, "aud": audio_path, "index": i, "dur": dur, "keyword": scene.get('b_roll_visual', MAIN_TOPIC)}
     except Exception as e:
         print(f"Scene {i} failed: {e}")
@@ -142,33 +137,29 @@ try:
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_v.txt', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', 'v_merged.mp4'], check=True)
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', 'list_a.txt', '-c:a', 'pcm_s16le', 'a_merged.wav'], check=True)
 
-    # Studio Rendering - Added normalize=0 to amix to fix volume jumping
+    # Studio Rendering
     studio_filter = "[1:a]asplit=2[voice_main][voice_control];[2:a]volume=0.45[bgm_low];[bgm_low][voice_control]sidechaincompress=threshold=0.05:ratio=12[ducked_bgm];[voice_main][ducked_bgm]amix=inputs=2:duration=first:normalize=0[aout];[0:v]drawtext=text='Decode':x=w-tw-50:y=h-th-50:fontsize=32:fontcolor=white@0.5[vout]"
     
-    # Decreased -b:v to 1.2M to solve Payload Too Large error
     subprocess.run(['ffmpeg', '-y', '-i', 'v_merged.mp4', '-i', 'a_merged.wav', '-stream_loop', '-1', '-i', 'bgm.mp3', '-filter_complex', studio_filter, '-map', '[vout]', '-map', '[aout]', '-c:v', 'libx264', '-b:v', '1.2M', '-preset', 'medium', '-c:a', 'aac', '-shortest', 'final_video.mp4'], check=True)
 
     # ==========================================
-    # GITHUB RELEASES UPLOAD (NEW METHOD)
+    # GITHUB RELEASES UPLOAD
     # ==========================================
     print("\n🚀 Uploading Video directly to GitHub Releases...")
     
     run_id = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
     tag_name = f"vid-{run_id}"
     
-    # Yahan Screenshot ke mutabik naya repo name set kiya gaya hai
     repo_name = os.environ.get('GITHUB_REPOSITORY', "shayarivibes46-a11y/AutoPilot-Tech-Hindi-Long") 
     
     cmd = ['gh', 'release', 'create', tag_name, 'final_video.mp4', '--repo', repo_name, '--notes', 'Automated Video Render']
     
-    # Synchronous subprocess run taaki baaki script ki flow bani rahe
     proc = subprocess.run(cmd, capture_output=True, text=True)
     
     if proc.returncode == 0:
         video_link = f"https://github.com/{repo_name}/releases/download/{tag_name}/final_video.mp4"
         print(f"✅ Success! Video uploaded to GitHub: {video_link}")
         
-        # Safe character replacement just like the original async file
         final_msg = f"READY_TO_UPLOAD|{video_link}|{video_title.replace('|', '')}|{thumbnail_prompt.replace('|', '')}|{video_desc.replace('|', '')}"
         requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id": chat_id, "text": final_msg})
     else:
