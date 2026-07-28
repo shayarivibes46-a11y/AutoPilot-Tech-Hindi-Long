@@ -19,8 +19,11 @@ on:
         description: 'Prompt for Thumbnail Generation'
         required: true
         type: string
+  # 👇 YEH LINE MISSING THI! Iske bina n8n se trigger nahi hoga
+  repository_dispatch:
+    types: [render_and_upload]
 
-# GitHub Releases create करने के लिए यह permission अनिवार्य है
+# GitHub Releases create karne ke liye permission
 permissions:
   contents: write
 
@@ -49,15 +52,16 @@ jobs:
 
       - name: 🚀 Run Async Video Render Pipeline
         env:
-          SCENES_DATA: ${{ inputs.scenes_data }}
-          TITLE: ${{ inputs.title }}
-          DESCRIPTION: ${{ inputs.description }}
-          THUMBNAIL_PROMPT: ${{ inputs.thumbnail_prompt }}
-          # Secrets (GitHub Repository Secrets में सेट होने चाहिए)
+          # 👇 Yahan dono ka support lagaya hai (client_payload for n8n, inputs for manual)
+          SCENES_DATA: ${{ github.event.client_payload.scenes_data || inputs.scenes_data }}
+          TITLE: ${{ github.event.client_payload.title || inputs.title }}
+          DESCRIPTION: ${{ github.event.client_payload.description || inputs.description }}
+          THUMBNAIL_PROMPT: ${{ github.event.client_payload.thumbnail_prompt || inputs.thumbnail_prompt }}
+          CHAT_ID: ${{ github.event.client_payload.chat_id || secrets.CHAT_ID }}
+          
+          # Secrets
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          # gh cli को authenticate करने के लिए GitHub Token
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
         run: |
           python render_video.py
