@@ -1,4 +1,5 @@
 import os, sys, json, subprocess, time, random, asyncio, re, string
+import urllib.parse
 import aiohttp
 import edge_tts
 import shutil
@@ -18,41 +19,10 @@ channel_name = "Decode Engineering®"
 print(f"DEBUG: Processing {len(scenes_data)} scenes async...")
 
 # --- SMART DYNAMIC FALLBACK KEYWORDS ---
-# GitHub Actions (via n8n) se jo bhi fallback theme aayegi, yeh usey list mein badal dega.
 fallback_env = os.environ.get('FALLBACK_KEYWORDS', 'galaxy, universe, space, nebula, stars, abstract motion background')
 FALLBACK_KEYWORDS = [kw.strip() for kw in fallback_env.split(',')]
 
 TEMP_DIR = "/dev/shm" if os.path.exists("/dev/shm") else os.getcwd()
-
-async def fetch_pexels_video(session, keyword):
-    queries_to_try = [keyword] + FALLBACK_KEYWORDS
-    for query in queries_to_try:
-        for attempt in range(2):
-            try:
-                await asyncio.sleep(random.uniform(0.1, 0.5))
-                # Jab attempts badhein toh safe page=1 rakho taaki khali result na aaye
-                random_page = random.randint(1, 2) if attempt == 0 else 1 
-                url = f"https://api.pexels.com/videos/search?query={query}&per_page=15&page={random_page}&orientation=landscape&size=large"
-                
-                async with session.get(url, headers={"Authorization": pexels_key}, timeout=10) as response:
-                    # [IMPROVED]: Added Rate Limit (429) Handling
-                    if response.status == 429:
-                        await asyncio.sleep(2)
-                        continue
-                        
-                    if response.status == 200:
-                        res = await response.json()
-                        if res.get('videos') and len(res['videos']) > 0:
-                            # Try to find a good quality link from a random video
-                            random_vid = random.choice(res['videos'])
-                            if random_vid.get('video_files'):
-                                # [IMPROVED]: Force HD/UHD quality preference over SD
-                                hd_files = [f for f in random_vid['video_files'] if f['quality'] in ['hd', 'uhd']]
-                                best_file = hd_files[0] if hd_files else random_vid['video_files'][0]
-                                return best_file['link']
-            except Exception:
-                continue
-    return None
 
 async def get_audio_duration(file_path):
     cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', file_path]
@@ -62,6 +32,38 @@ async def get_audio_duration(file_path):
         return float(stdout.decode().strip())
     except:
         return 5.0 
+
+async def fetch_pexels_video(session, keyword):
+    queries_to_try = [keyword] + FALLBACK_KEYWORDS
+    for query in queries_to_try:
+        for attempt in range(2):
+            try:
+                await asyncio.sleep(random.uniform(0.1, 0.5))
+                random_page = random.randint(1, 2) if attempt == 0 else 1 
+                url = f"https://api.pexels.com/videos/search?query={urllib.parse.quote(query)}&per_page=15&page={random_page}&orientation=landscape&size=large"
+                
+                async with session.get(url, headers={"Authorization": pexels_key}, timeout=10) as response:
+                    # [IMPROVED]: Added Rate Limit (429) Handling
+                    if response.status == 429:
+                        await asyncio.sleep(2)
+                        continue
+                        
+                    if response.status == 200:
+                        res = await response.json()
+                        videos = res.get('videos', [])
+                        if videos:
+                            random.shuffle(videos)
+                            # [FIXED]: Ek video par depend rehne ke bajaye top 3 me se best HD nikalega
+                            for v in videos[:3]:
+                                try:
+                                    hd_files = [f for f in v['video_files'] if f['quality'] in ['hd', 'uhd']]
+                                    best_file = hd_files[0] if hd_files else v['video_files'][0]
+                                    return best_file['link']
+                                except Exception:
+                                    continue
+            except Exception:
+                continue
+    return None
 
 async def process_scene(session, i, scene):
     keyword = scene.get('keyword', 'abstract')
@@ -94,13 +96,12 @@ async def process_scene(session, i, scene):
         dur = max(1.0, raw_dur - 0.2) 
         fade_out = max(0, dur - 0.5)
         
-        # VIDEO FETCH & DOWNLOAD RETRY LOGIC (To Fix Black Screen)
+        # VIDEO FETCH & DOWNLOAD RETRY LOGIC
         is_valid_video = False
         vid_url = await fetch_pexels_video(session, keyword)
         
-        for download_attempt in range(3):  # Download fail ho toh 3 baar retry karega
+        for download_attempt in range(3):  
             if not vid_url:
-                # [IMPROVED]: Dynamic fallback word use kiya hai instead of hardcoded 'galaxy'
                 vid_url = await fetch_pexels_video(session, random.choice(FALLBACK_KEYWORDS))
                 
             if vid_url:
@@ -108,18 +109,18 @@ async def process_scene(session, i, scene):
                     async with session.get(vid_url, timeout=15) as resp:
                         if resp.status == 200:
                             vid_bytes = await resp.read()
-                            # [IMPROVED]: Increased size threshold to 200KB to strictly avoid corrupt/small files
-                            if len(vid_bytes) > 200000: 
+                            # 👇 YAHAN SIZE LIMIT 50KB KAR DI HAI TAAKI BLACK SCREEN NA AAYE 👇
+                            if len(vid_bytes) > 50000: 
                                 with open(vid_path, "wb") as f:
                                     f.write(vid_bytes)
                                 is_valid_video = True
-                                break # Download successful, break out of retry loop
+                                break 
                             else:
                                 print(f"Video file too small ({len(vid_bytes)} bytes) on attempt {download_attempt+1}, discarding.")
                 except Exception as e:
                     print(f"Failed to download video for scene {i} on attempt {download_attempt+1}: {str(e)}")
             
-            vid_url = None # Reset kardo taaki next loop mein naya video fetch ho sake
+            vid_url = None
 
         pop_path = os.path.abspath("pop.mp3")
         has_pop = os.path.exists(pop_path)
@@ -129,18 +130,17 @@ async def process_scene(session, i, scene):
             if has_pop: cmd += ['-i', pop_path]
             v_filter = f"[0:v]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,format=yuv420p,fps=30,unsharp=5:5:0.5:5:5:0.0,eq=contrast=1.1:saturation=1.25,drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
         else:
-            # Agar 3 baar retry ke baad bhi video fail ho gaya, tabhi color generate hoga (almost impossible now)
             cmd = ['ffmpeg', '-y', '-f', 'lavfi', '-i', f'color=c=#151525:s=1920x1080:d={dur}', '-ss', '0.2', '-i', raw_mp3]
             if has_pop: cmd += ['-i', pop_path]
             v_filter = f"[0:v]drawtext=text='{channel_name}':fontcolor=white@0.5:fontsize=48:x=w-tw-50:y=h-th-50,fade=t=in:st=0:d=0.5,fade=t=out:st={fade_out}:d=0.5[v]"
 
-        # YAHAN FIX KIYA GAYA HAI: apad lagaya gaya hai audio stream end mein
+        # 👇 YAHAN AUDIO MIXING MEIN aformat LAGAYA HAI 👇
         if has_pop:
-            a_filter = "[1:a]volume=1.0,apad[voice];[2:a]volume=0.8[pop];[voice][pop]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]"
+            a_filter = "[1:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=1.0,apad[voice];[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=0.8[pop];[voice][pop]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]"
             filter_complex = f"{v_filter};{a_filter}"
             a_map = '[aout]'
         else:
-            a_filter = "[1:a]apad[aout]"
+            a_filter = "[1:a]aformat=sample_rates=44100:channel_layouts=stereo,apad[aout]"
             filter_complex = f"{v_filter};{a_filter}"
             a_map = '[aout]'
             
@@ -197,7 +197,6 @@ async def main_pipeline():
         if os.path.exists(bgm_path):
             bgm_cmd = [
                 'ffmpeg', '-y', '-i', raw_video, '-stream_loop', '-1', '-i', bgm_path,
-                # 👇 YAHAN BGM VOLUME 0.38 KI GAYI HAI 👇
                 '-filter_complex', '[0:a]volume=1.0[voice];[1:a]volume=0.38[bgm];[voice][bgm]amix=inputs=2:duration=first:dropout_transition=0[aout_mix];[aout_mix]volume=2.0[aout]',
                 '-map', '0:v', '-map', '[aout]',
                 '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', final_video
@@ -214,14 +213,14 @@ async def main_pipeline():
             if os.path.exists(r['aud']): os.remove(r['aud'])
 
         # ==========================================
-        # PHASE 3: GITHUB RELEASES (THE ULTIMATE FIX)
+        # PHASE 3: GITHUB RELEASES
         # ==========================================
         video_link = None
         print("\n🚀 Uploading Video directly to GitHub Releases...")
         
         run_id = os.environ.get('GITHUB_RUN_ID', str(int(time.time())))
         tag_name = f"vid-{run_id}"
-        repo_name = "shayarivibes46-a11y/AutoPilot-Tech-Hindi-Long" 
+        repo_name = os.environ.get('GITHUB_REPOSITORY', "shayarivibes46-a11y/AutoPilot-Tech-Hindi-Long") 
         
         try:
             cmd = ['gh', 'release', 'create', tag_name, final_video, '--repo', repo_name, '--notes', 'Automated Video Render']
